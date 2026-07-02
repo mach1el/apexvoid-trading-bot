@@ -1,0 +1,119 @@
+# Deployment Guide
+
+The bot runs as a single long-polling container. It makes only **outbound**
+connections, so there is **no DNS, no TLS certificate, no reverse proxy, and no
+inbound firewall port** to configure. Any small Linux host with Docker works —
+a $5 VPS, a home server, or a Raspberry Pi.
+
+## Prerequisites
+
+- A host with Docker Engine + Compose v2.
+- A Telegram account.
+- (Optional) An Anthropic API key for chart analysis.
+- About 15 minutes.
+
+## 1. Host & Docker
+
+Any Linux host will do. Install Docker's official packages (Compose v2 ships as
+a plugin):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian $CODENAME stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+                        docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker "$USER" && newgrp docker
+```
+
+> The only inbound port the host needs is SSH (22). No 80/443. If you run a
+> host firewall, you do **not** need to open anything for the bot.
+
+## 2. Telegram credentials
+
+1. **Bot token** — chat with `@BotFather`, `/newbot`, record the token.
+2. **Channel** — create a private channel, add the bot as an administrator with
+   **Post Messages** permission, and post any message in it.
+3. **Chat ID** — visit `https://api.telegram.org/bot<TOKEN>/getUpdates`, find
+   `chat.id` (a negative integer starting with `-100`).
+4. **Owner ID** — DM `@userinfobot` (or check `getUpdates`) to get your numeric
+   Telegram user ID. This locks DM commands to you.
+5. **API ID / hash** (pips calculator only) — create an app at
+   <https://my.telegram.org> and copy `api_id` / `api_hash`.
+
+## 3. Configure
+
+```bash
+git clone <repo-url> xau-signal-bot
+cd xau-signal-bot
+cp .env.example .env
+chmod 600 .env
+nano .env
+```
+
+Fill in:
+
+```
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+TELEGRAM_CHAT_ID=-100xxxxxxxxxx
+TELEGRAM_OWNER_ID=<your numeric user id>
+TELEGRAM_API_ID=<from my.telegram.org>       # pips calculator
+TELEGRAM_API_HASH=<from my.telegram.org>     # pips calculator
+ANTHROPIC_API_KEY=sk-ant-...                 # chart analysis (optional)
+DB_PATH=/data/signals.db
+LOG_LEVEL=INFO
+```
+
+## 4. Generate the Pyrogram session (pips calculator)
+
+The pips calculator reads channel history over MTProto with a **user** session
+(the Bot API can't read history). Generate it once:
+
+```bash
+python gen_session.py     # follow the login prompts
+```
+
+Store the resulting session per the script's instructions. Skip this step if
+you don't use the pips calculator.
+
+## 5. Launch
+
+```bash
+docker compose up -d --build
+docker compose ps                 # 'bot' is Up
+docker compose logs -f bot
+```
+
+Expected startup lines:
+
+```
+bot: DB ready at /data/signals.db
+bot: Starting Telegram polling
+```
+
+## 6. Smoke test
+
+DM your bot:
+
+- `active` → `📋 No open signals.`
+- `gold buy entry zone (4100-4105)` / `sl 4095` / `tp 10/20/30` → posts a
+  formatted signal to the channel and replies `✅ Sent to channel (signal #1)`.
+- (If configured) DM a chart screenshot → analysis is posted to the channel.
+
+## Deployment Checklist
+
+- [ ] Docker + Compose v2 installed; `docker run hello-world` works.
+- [ ] Bot created, added to the channel as admin with Post Messages.
+- [ ] `.env` populated (`600` perms) with bot token, chat id, owner id.
+- [ ] (Pips) `TELEGRAM_API_ID/HASH` set and `gen_session.py` run.
+- [ ] (Charts) `ANTHROPIC_API_KEY` set.
+- [ ] `docker compose up -d` brings `bot` Up; logs show polling started.
+- [ ] DM `active` returns the empty-state reply.
