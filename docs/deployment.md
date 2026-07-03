@@ -46,8 +46,6 @@ sudo usermod -aG docker "$USER" && newgrp docker
    `chat.id` (a negative integer starting with `-100`).
 4. **Owner ID** — DM `@userinfobot` (or check `getUpdates`) to get your numeric
    Telegram user ID. This locks DM commands to you.
-5. **API ID / hash** (pips calculator only) — create an app at
-   <https://my.telegram.org> and copy `api_id` / `api_hash`.
 
 ## 3. Configure
 
@@ -65,26 +63,12 @@ Fill in:
 TELEGRAM_BOT_TOKEN=<from @BotFather>
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx
 TELEGRAM_OWNER_ID=<your numeric user id>
-TELEGRAM_API_ID=<from my.telegram.org>       # pips calculator
-TELEGRAM_API_HASH=<from my.telegram.org>     # pips calculator
 ANTHROPIC_API_KEY=sk-ant-...                 # chart analysis (optional)
 DB_PATH=/data/signals.db
 LOG_LEVEL=INFO
 ```
 
-## 4. Generate the Pyrogram session (pips calculator)
-
-The pips calculator reads channel history over MTProto with a **user** session
-(the Bot API can't read history). Generate it once:
-
-```bash
-python gen_session.py     # follow the login prompts
-```
-
-Store the resulting session per the script's instructions. Skip this step if
-you don't use the pips calculator.
-
-## 5. Launch
+## 4. Launch
 
 ```bash
 docker compose up -d --build
@@ -99,7 +83,7 @@ bot: DB ready at /data/signals.db
 bot: Starting Telegram polling
 ```
 
-## 6. Smoke test
+## 5. Smoke test
 
 DM your bot:
 
@@ -113,7 +97,6 @@ DM your bot:
 - [ ] Docker + Compose v2 installed; `docker run hello-world` works.
 - [ ] Bot created, added to the channel as admin with Post Messages.
 - [ ] `.env` populated (`600` perms) with bot token, chat id, owner id.
-- [ ] (Pips) `TELEGRAM_API_ID/HASH` set and `gen_session.py` run.
 - [ ] (Charts) `ANTHROPIC_API_KEY` set.
 - [ ] `docker compose up -d` brings `bot` Up; logs show polling started.
 - [ ] DM `active` returns the empty-state reply.

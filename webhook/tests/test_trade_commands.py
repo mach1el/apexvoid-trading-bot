@@ -1,0 +1,259 @@
+import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+os.environ.setdefault(
+  "TELEGRAM_BOT_TOKEN",
+  "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+)
+os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
+
+from app import dedup, symbols, telegram
+from app.reports import format_review
+from app.symbols import SYMBOLS, pip_for, symbol_for_channel
+
+
+def _dm(text: str, user_id: int = 42):
+  return SimpleNamespace(
+    text=text,
+    from_user=SimpleNamespace(id=user_id),
+    answer=AsyncMock(),
+  )
+
+
+def _channel(text: str, chat_id: int = -100123456789):
+  return SimpleNamespace(
+    text=text,
+    message_id=900,
+    chat=SimpleNamespace(id=chat_id),
+    reply_to_message=SimpleNamespace(message_id=700),
+  )
+
+
+@pytest.mark.asyncio
+async def test_scoped_command_menu(monkeypatch):
+  target = SimpleNamespace(set_my_commands=AsyncMock())
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+
+  await telegram.setup_commands(target)
+
+  first, second = target.set_my_commands.await_args_list
+  assert first.args[0] == []
+  assert first.kwargs["scope"].type == "default"
+  assert second.args[0] == telegram.OWNER_COMMANDS
+  assert second.kwargs["scope"].chat_id == 42
+  assert {command.command for command in telegram.OWNER_COMMANDS} == {
+    "trade_active", "trade_close", "trade_sl", "trade_cancel",
+    "trade_reopen", "trade_tag", "trade_note", "trade_review",
+    "trade_stats", "trade_pips", "help",
+  }
+
+
+@pytest.mark.asyncio
+async def test_channel_and_dm_close_share_executor(monkeypatch):
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  monkeypatch.setattr(
+    telegram,
+    "_resolve_sid",
+    AsyncMock(return_value=3),
+  )
+  execute = AsyncMock(return_value={"action": "close", "ok": True})
+  monkeypatch.setattr(telegram, "do_close", execute)
+  monkeypatch.setattr(
+    telegram,
+    "post_result",
+    AsyncMock(return_value="closed"),
+  )
+  monkeypatch.setattr(telegram, "_delete_command", AsyncMock())
+
+  await telegram.handle_channel_close(_channel("close #3 +80"))
+  await telegram.handle_trade_close(_dm("/trade_close 3 +80"))
+
+  channel_ctx = execute.await_args_list[0].args[0]
+  dm_ctx = execute.await_args_list[1].args[0]
+  assert {
+    key: channel_ctx[key]
+    for key in ("sid", "symbol", "chat_id", "pips", "frac")
+  } == {
+    key: dm_ctx[key]
+    for key in ("sid", "symbol", "chat_id", "pips", "frac")
+  }
+
+
+@pytest.mark.asyncio
+async def test_unknown_channel_is_ignored(monkeypatch):
+  execute = AsyncMock()
+  monkeypatch.setattr(telegram, "do_close", execute)
+
+  await telegram.handle_channel_close(_channel("close #3 +80", -999))
+
+  execute.assert_not_awaited()
+
+
+def test_symbol_channel_and_pip_maps(monkeypatch):
+  monkeypatch.setitem(
+    SYMBOLS,
+    "US30",
+    {"pip": 1.0, "digits": 1},
+  )
+  monkeypatch.setattr(symbols, "CHANNELS", [
+    {
+      "symbol": "XAU", "tier": "vip",
+      "channel_id": -100123456789,
+    },
+    {
+      "symbol": "US30", "tier": "vip",
+      "channel_id": -100987,
+    },
+  ])
+
+  assert symbol_for_channel(-100123456789) == "XAU"
+  assert symbol_for_channel(-100987) == "US30"
+  assert symbol_for_channel(-999) is None
+  assert pip_for("XAU") == 0.1
+  assert pip_for("US30") == 1.0
+
+
+@pytest.mark.asyncio
+async def test_per_symbol_sequence_and_resolver(tmp_path, monkeypatch):
+  monkeypatch.setattr(dedup.settings, "db_path", str(tmp_path / "symbols.db"))
+  await dedup.init_db()
+  xau = await dedup.store_manual_signal(
+    1, "BUY", 2000, 2001, 1990, [2010], symbol="XAU",
+  )
+  us30 = await dedup.store_manual_signal(
+    2, "BUY", 40000, 40001, 39990, [40010], symbol="US30",
+  )
+
+  assert xau["daily_seq"] == 1
+  assert us30["daily_seq"] == 1
+  assert await telegram._resolve_sid(1, None, "XAU") == xau["id"]
+  assert await telegram._resolve_sid(1, None, "US30") == us30["id"]
+
+
+def test_review_uses_symbol_pip_size(monkeypatch):
+  monkeypatch.setitem(
+    SYMBOLS,
+    "US30",
+    {"pip": 1.0, "digits": 1, "channel_id": -100987},
+  )
+  base = {
+    "id": 1,
+    "daily_seq": 1,
+    "action": "BUY",
+    "entry": 100.0,
+    "entry_end": 100.0,
+    "sl": 90.0,
+    "tps": [120.0],
+    "status": "closed",
+    "result_pips": 100,
+    "legs": [],
+  }
+
+  assert "realized ~1.0R" in format_review([{**base, "symbol": "XAU"}])
+  assert "realized ~10.0R" in format_review([
+    {**base, "symbol": "US30"},
+  ])
+
+
+@pytest.mark.asyncio
+async def test_trade_stats_symbol_filter_and_all(monkeypatch):
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  monkeypatch.setitem(
+    SYMBOLS,
+    "US30",
+    {"pip": 1.0, "digits": 1, "channel_id": -100987},
+  )
+  records = AsyncMock(return_value=[])
+  signals = AsyncMock(return_value=[])
+  monkeypatch.setattr(telegram, "get_pips_records", records)
+  monkeypatch.setattr(telegram, "get_all_signals", signals)
+
+  await telegram.handle_trade_stats(_dm("/trade_stats US30 week"))
+  assert records.await_args.args[2] == "US30"
+  assert signals.await_args.args == ("US30",)
+
+  await telegram.handle_trade_stats(_dm("/trade_stats week"))
+  assert records.await_args.args[2] is None
+  assert signals.await_args.args == (None,)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_outputs_stay_in_owner_dm(monkeypatch):
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  channel_target = AsyncMock()
+  monkeypatch.setattr(telegram, "post_result", channel_target)
+  monkeypatch.setattr(
+    telegram,
+    "get_pips_summary",
+    AsyncMock(return_value={
+      "total": 1,
+      "wins": 1,
+      "losses": 0,
+      "win_pips": 70,
+      "loss_pips": 0,
+      "net": 70,
+    }),
+  )
+  monkeypatch.setattr(
+    telegram,
+    "get_pips_records",
+    AsyncMock(return_value=[]),
+  )
+  monkeypatch.setattr(
+    telegram,
+    "get_all_signals",
+    AsyncMock(return_value=[]),
+  )
+  monkeypatch.setattr(
+    telegram,
+    "_resolve_any_sid",
+    AsyncMock(return_value=1),
+  )
+  monkeypatch.setattr(
+    telegram,
+    "get_signal_cluster",
+    AsyncMock(return_value=[{
+      "id": 1,
+      "daily_seq": 1,
+      "symbol": "XAU",
+      "action": "BUY",
+      "entry": 2000.0,
+      "entry_end": 2000.0,
+      "sl": 1990.0,
+      "tps": [2010.0],
+      "status": "closed",
+      "result_pips": 70,
+      "legs": [],
+    }]),
+  )
+
+  messages = [
+    _dm("/trade_pips today"),
+    _dm("/trade_stats today"),
+    _dm("/trade_review #1"),
+  ]
+  await telegram.handle_trade_pips(messages[0])
+  await telegram.handle_trade_stats(messages[1])
+  await telegram.handle_trade_review(messages[2])
+
+  assert all(msg.answer.await_count for msg in messages)
+  channel_target.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_help_is_owner_only_and_documents_both_surfaces(monkeypatch):
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  owner = _dm("/help")
+  stranger = _dm("/help", user_id=99)
+
+  await telegram.handle_help(owner)
+  await telegram.handle_help(stranger)
+
+  text = owner.answer.await_args.args[0]
+  assert "Channel replies" in text
+  assert "close #id ±pips [%] | be" in text
+  assert "/trade_close [SYMBOL]" in text
+  stranger.answer.assert_not_awaited()
