@@ -260,10 +260,10 @@ async def test_manual_tp_is_notify_only_and_tier_aware(monkeypatch):
 
   assert result["ok"]
   assert trade_ops.render_result(result, "XAU", "vip") == (
-    "🎯 #7 TP2 (+56 pips) 💸"
+    "🎯 #7 TP2 +56 pips 💸"
   )
   assert trade_ops.render_result(result, "XAU", "public") == (
-    "🎯 TP2 (+56 pips) 💸"
+    "🎯 TP2 +56 pips 💸"
   )
 
   monkeypatch.setattr(trade_ops.settings, "public_show_pips", False)
