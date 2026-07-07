@@ -143,3 +143,70 @@ async def test_close_leg_rejects_overbook(tmp_path, monkeypatch):
   assert rejected["remaining"] == pytest.approx(0.5)
   open_signal = (await dedup.get_open_signals())[0]
   assert len(open_signal["legs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_undo_last_close_leg_restores_running_signal(
+  tmp_path,
+  monkeypatch,
+):
+  db_path = tmp_path / "undo-close.db"
+  monkeypatch.setattr(dedup.settings, "db_path", str(db_path))
+  await dedup.init_db()
+  rec = await dedup.store_manual_signal(
+    1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
+  )
+
+  await dedup.close_leg(rec["id"], 50, 0.5)
+  final = await dedup.close_leg(rec["id"], 90)
+  await dedup.store_pips("+", final["net"], signal_id=rec["id"])
+
+  restored = await dedup.undo_last_close_leg(rec["id"])
+
+  assert restored["status"] == "open"
+  assert restored["remaining"] == pytest.approx(0.5)
+  assert restored["restored_leg"]["pips"] == 90
+  row = await dedup.get_manual_signal(rec["id"])
+  assert row["status"] == "open"
+  assert row["result_pips"] is None
+  assert row["closed_at"] is None
+  assert len(row["legs"]) == 1
+  assert row["legs"][0]["pips"] == 50
+
+  db = sqlite3.connect(db_path)
+  pips_rows = db.execute(
+    "SELECT COUNT(*) FROM pips_log WHERE signal_id = ?",
+    (rec["id"],),
+  ).fetchone()[0]
+  db.close()
+  assert pips_rows == 0
+
+
+@pytest.mark.asyncio
+async def test_undo_legacy_close_without_legs(tmp_path, monkeypatch):
+  db_path = tmp_path / "undo-legacy.db"
+  monkeypatch.setattr(dedup.settings, "db_path", str(db_path))
+  await dedup.init_db()
+  rec = await dedup.store_manual_signal(
+    1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
+  )
+
+  db = sqlite3.connect(db_path)
+  db.execute(
+    "UPDATE manual_signals "
+    "SET status = 'closed', result_pips = 80, closed_at = 123 "
+    "WHERE id = ?",
+    (rec["id"],),
+  )
+  db.commit()
+  db.close()
+
+  restored = await dedup.undo_last_close_leg(rec["id"])
+
+  assert restored["status"] == "open"
+  assert restored["remaining"] == pytest.approx(1.0)
+  row = await dedup.get_manual_signal(rec["id"])
+  assert row["status"] == "open"
+  assert row["result_pips"] is None
+  assert row["closed_at"] is None
+  assert row["legs"] == []

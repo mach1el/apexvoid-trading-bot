@@ -180,6 +180,25 @@ def test_partial_close_uses_clear_pips_without_at_sign():
   assert "@" not in text
 
 
+def test_uncclose_rendering_restores_running_status_without_public_id():
+  result = {
+    "action": "uncclose",
+    "ok": True,
+    "row": {
+      "id": 1,
+      "daily_seq": 7,
+    },
+    "remaining": 0.5,
+  }
+
+  assert trade_ops.render_result(result, "XAU", "vip") == (
+    "♻️ #7 restored — trade still running · remaining 50%"
+  )
+  public = trade_ops.render_result(result, "XAU", "public")
+  assert public == "♻️ restored — trade still running · remaining 50%"
+  assert "#7" not in public
+
+
 @pytest.mark.asyncio
 async def test_metadata_acks_stay_in_owner_dm(monkeypatch):
   fanout = AsyncMock()

@@ -45,7 +45,8 @@ async def test_scoped_command_menu(monkeypatch):
   assert second.args[0] == telegram.OWNER_COMMANDS
   assert second.kwargs["scope"].chat_id == 42
   assert {command.command for command in telegram.OWNER_COMMANDS} == {
-    "trade_active", "trade_close", "trade_tp", "trade_sl", "trade_cancel",
+    "trade_active", "trade_close", "trade_uncclose", "trade_tp",
+    "trade_sl", "trade_cancel",
     "trade_reopen", "trade_tag", "trade_note", "trade_review",
     "trade_stats", "trade_pips", "help",
   }
@@ -113,6 +114,40 @@ async def test_manual_tp_command_is_notify_only(monkeypatch):
   })
   post.assert_awaited_once_with(execute.return_value, "XAU")
   msg.answer.assert_awaited_once_with("🎯 #1 TP2 (+56 pips)")
+
+
+@pytest.mark.asyncio
+async def test_uncclose_command_resolves_closed_signal(monkeypatch):
+  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  monkeypatch.setattr(
+    telegram,
+    "_resolve_any_sid",
+    AsyncMock(return_value=3),
+  )
+  execute = AsyncMock(return_value={
+    "action": "uncclose",
+    "ok": True,
+    "sid": 3,
+    "row": {"id": 3, "daily_seq": 1},
+    "remaining": 1.0,
+  })
+  post = AsyncMock(return_value="♻️ #1 restored — trade still running")
+  monkeypatch.setattr(telegram, "do_uncclose", execute)
+  monkeypatch.setattr(telegram, "post_result", post)
+  msg = _dm("/trade_uncclose XAU #1")
+
+  await telegram.handle_trade_uncclose(msg)
+
+  execute.assert_awaited_once_with({
+    "sid": 3,
+    "symbol": "XAU",
+    "chat_id": telegram.channel_for_symbol("XAU"),
+    "reply_to": None,
+  })
+  post.assert_awaited_once_with(execute.return_value, "XAU")
+  msg.answer.assert_awaited_once_with(
+    "♻️ #1 restored — trade still running"
+  )
 
 
 @pytest.mark.asyncio
@@ -289,5 +324,6 @@ async def test_help_is_owner_only_and_documents_both_surfaces(monkeypatch):
   assert "Channel replies" in text
   assert "close #id ±pips [%] | be" in text
   assert "/trade_close [SYMBOL]" in text
+  assert "/trade_uncclose [SYMBOL]" in text
   assert "/trade_tp [SYMBOL]" in text
   stranger.answer.assert_not_awaited()
