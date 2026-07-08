@@ -12,8 +12,41 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import dedup, telegram
-from app.reports import build_stats, format_review, format_stats, sparkline
+from app import dedup, telegram, trade_ops
+from app.reports import _round_lines, build_stats, format_review, format_stats, sparkline
+
+
+@pytest.mark.asyncio
+async def test_reopen_inherits_original_stop_not_moved_sl():
+  await dedup.init_db()
+  src = await dedup.store_manual_signal(
+    1, "BUY", 4100.0, 4105.0, 4088.0, [4130.0], symbol="XAU",
+  )
+  # TP1 → move stop to break-even (entry mid). sl is overwritten in place.
+  await dedup.update_sl(src["id"], 4102.5)
+  moved = await dedup.get_manual_signal(src["id"])
+  assert moved["sl"] == 4102.5 and moved["original_sl"] == 4088.0
+
+  result = await trade_ops.do_reopen({
+    "sid": src["id"], "symbol": "XAU", "entry_override": None,
+  })
+  round2 = await dedup.get_manual_signal(result["record"]["id"])
+  # Round 2 must start from the ORIGINAL stop, not the break-even one.
+  assert round2["sl"] == 4088.0
+  assert round2["original_sl"] == 4088.0
+
+
+def test_reports_risk_uses_original_stop():
+  # Stop moved to BE (= entry mid); realized R must still use the original stop.
+  signal = {
+    "id": 1, "daily_seq": 1, "action": "BUY", "symbol": "XAU",
+    "entry": 4100.0, "entry_end": 4105.0,
+    "sl": 4102.5, "original_sl": 4088.0,
+    "tps": [4130.0], "result_pips": 145, "legs": [],
+  }
+  lines = "\n".join(_round_lines(signal, 1))
+  # risk = |4102.5 - 4088| = 14.5 → 145 pips; net 145 → realized ~1.0R.
+  assert "~1.0R" in lines
 
 
 async def _new_signal(
