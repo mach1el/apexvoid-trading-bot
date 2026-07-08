@@ -74,6 +74,30 @@ async def test_menu_shows_only_valid_fractions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_menu_includes_cancel_that_restores_close(monkeypatch):
+  monkeypatch.setattr(
+    telegram,
+    "get_manual_signal",
+    AsyncMock(return_value={"status": "open", "legs": []}),
+  )
+  # Open the submenu -> it must offer a Cancel back-out.
+  menu = _cb("c0:3:1:90")
+  await telegram.handle_close_menu(menu)
+  submenu = menu.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+  assert "cx:3:1:90" in _codes(submenu)
+
+  # Pressing Cancel restores the single Close button and closes nothing.
+  do_close = AsyncMock()
+  monkeypatch.setattr(telegram, "do_close", do_close)
+  cancel = _cb("cx:3:1:90")
+  await telegram.handle_close_cancel(cancel)
+
+  do_close.assert_not_awaited()
+  kb = cancel.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+  assert _codes(kb) == ["c0:3:1:90"]
+
+
+@pytest.mark.asyncio
 async def test_menu_on_closed_signal_removes_buttons(monkeypatch):
   monkeypatch.setattr(
     telegram, "get_manual_signal", AsyncMock(return_value=None)
