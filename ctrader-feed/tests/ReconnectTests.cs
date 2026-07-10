@@ -64,6 +64,7 @@ public sealed class ReconnectTests
       BarsWindowMax: 1500,
       BarsChannel: "bars:new",
       HeartbeatFile: heartbeatPath,
+      RefreshTokenKey: "ctrader:refresh_token",
       RequestTimeout: TimeSpan.FromSeconds(1),
       TokenRefreshInterval: TimeSpan.FromHours(1)
     );
@@ -82,13 +83,17 @@ public sealed class ReconnectTests
 
 internal sealed class FakeCTraderClient : ICTraderFeedClient
 {
+  public event Action? Heartbeat;
+
   public int AuthCount { get; private set; }
   public int ResolveCount { get; private set; }
   public int BackfillCount { get; private set; }
   public int SubscribeCount { get; private set; }
   public IReadOnlyList<RawTrendbar> Backfill { get; init; } = [];
   public bool ThrowAfterLiveStart { get; init; }
+  public Action? OnLiveStart { get; init; }
   public Action? CancelOnLiveStart { get; init; }
+  public int HeartbeatsOnLiveStart { get; init; }
 
   public Task ConnectAndAuthorizeAsync(CancellationToken cancellationToken)
   {
@@ -131,6 +136,11 @@ internal sealed class FakeCTraderClient : ICTraderFeedClient
     [EnumeratorCancellation] CancellationToken cancellationToken
   )
   {
+    OnLiveStart?.Invoke();
+    for (var i = 0; i < HeartbeatsOnLiveStart; i++)
+    {
+      Heartbeat?.Invoke();
+    }
     CancelOnLiveStart?.Invoke();
     if (ThrowAfterLiveStart)
     {
