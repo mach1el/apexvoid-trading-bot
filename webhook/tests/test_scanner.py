@@ -123,3 +123,59 @@ async def test_scanner_dedups_same_setup_level_and_only_dms_owner(monkeypatch):
   ) > 0
   broadcast_entry.assert_not_awaited()
   store_manual_signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scanner_records_analysis_status_without_owner(monkeypatch):
+  client = redis_state.get_client()
+  notify = AsyncMock()
+  monkeypatch.setattr(scanner.settings, "scanner_symbols", "XAU")
+  monkeypatch.setattr(scanner.settings, "scanner_exec_tf", "M5")
+  monkeypatch.setattr(scanner.settings, "scanner_htf", "M30,M15")
+  monkeypatch.setattr(scanner.settings, "scanner_window", 500)
+  monkeypatch.setattr(scanner.settings, "telegram_owner_id", None)
+
+  class Source:
+    async def window(self, symbol, tf, n):
+      assert symbol == "XAU"
+      assert tf in {"M5", "M30", "M15"}
+      assert n == 500
+      return _frame()
+
+  ctx = SimpleNamespace(
+    tf="M5",
+    htf_bias="up",
+    structures={"M30": SimpleNamespace(bias="up")},
+  )
+  monkeypatch.setattr(
+    scanner,
+    "build_context",
+    lambda symbol, tf, frames, settings, htf_order: ctx,
+  )
+  result = scanner.DetectionResult(
+    setup="Trend Pullback",
+    direction="BUY",
+    key_level=4100.0,
+    entry_zone=Zone(4098, 4102, "demand"),
+    confluence=3,
+    reasons=["HTF bias up", "WAE reset"],
+  )
+
+  sent = await scanner._handle_event(
+    "XAU:M5:123",
+    source=Source(),
+    client=client,
+    detectors=(lambda received_ctx: result,),
+    notify=notify,
+  )
+
+  assert sent == []
+  notify.assert_not_awaited()
+  status = json.loads(await client.get("scanner:last_tick:XAU:M5"))
+  assert status["status"] == "ok"
+  assert status["symbol"] == "XAU"
+  assert status["tf"] == "M5"
+  assert status["event_ts"] == "123"
+  assert status["frames"] == {"M15": 1, "M30": 1, "M5": 1}
+  assert status["detected"][0]["setup"] == "Trend Pullback"
+  assert status["sent"] == 0
