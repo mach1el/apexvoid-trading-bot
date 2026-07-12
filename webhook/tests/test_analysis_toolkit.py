@@ -7,17 +7,36 @@ from app.analysis import (
   _htf_bias,
   analyze,
 )
+from app.dealing_range import dealing_range
 from app.levels import key_levels
 from app.liquidity import liquidity_grabs, liquidity_pools
 from app.momentum import momentum
-from app.pa_types import Break, Leg, Level, Pool, Swing, Zone
+from app.pa_types import Break, DealingRange, Leg, Level, Pool, SessionLevel, Swing, Zone
+from app.session_liquidity import previous_week_levels, session_levels
 from app.structure import market_structure, structure_breaks
 from app.swings import find_swings
-from app.zones import mark_mitigation, merge_zones, order_blocks, score_zones
+from app.zones import (
+  breaker_blocks,
+  mark_mitigation,
+  merge_zones,
+  order_blocks,
+  score_zones,
+)
 
 
 def _df(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
   index = pd.date_range("2026-07-10", periods=len(rows), freq="5min", tz="UTC")
+  return pd.DataFrame(
+    rows,
+    columns=["open", "high", "low", "close"],
+    index=index,
+  ).assign(volume=100)
+
+
+def _df_with_index(
+  index: pd.DatetimeIndex,
+  rows: list[tuple[float, float, float, float]],
+) -> pd.DataFrame:
   return pd.DataFrame(
     rows,
     columns=["open", "high", "low", "close"],
@@ -279,6 +298,177 @@ def test_liquidity_pool_and_grab_from_equal_highs():
   assert any(grab.direction == "bear" for grab in grabs)
 
 
+def test_session_levels_bucket_sessions_sweeps_and_rollover():
+  index = pd.date_range(
+    "2026-07-09 00:00",
+    "2026-07-12 02:00",
+    freq="5min",
+    tz="UTC",
+  )
+  rows = []
+  for ts in index:
+    high = 101.0
+    low = 99.0
+    if ts == pd.Timestamp("2026-07-10 01:00", tz="UTC"):
+      high = 120.0
+    if ts == pd.Timestamp("2026-07-10 02:00", tz="UTC"):
+      low = 90.0
+    if ts == pd.Timestamp("2026-07-10 08:00", tz="UTC"):
+      high = 121.0
+    if ts == pd.Timestamp("2026-07-10 09:00", tz="UTC"):
+      high = 115.0
+    if ts == pd.Timestamp("2026-07-10 10:00", tz="UTC"):
+      low = 95.0
+    if ts == pd.Timestamp("2026-07-10 15:00", tz="UTC"):
+      high = 118.0
+    if ts == pd.Timestamp("2026-07-10 16:00", tz="UTC"):
+      low = 94.0
+    if ts == pd.Timestamp("2026-07-10 22:30", tz="UTC"):
+      high = 130.0
+    rows.append((100.0, high, low, 100.5))
+  df = _df_with_index(index, rows)
+
+  levels = session_levels(df, AnalysisSettings())
+  asia_high = next(
+    level for level in levels
+    if level.name == "ASIA_H" and level.price == 120.0
+  )
+  asia_low = next(
+    level for level in levels
+    if level.name == "ASIA_L" and level.price == 90.0
+  )
+  pdh = next(level for level in levels if level.name == "PDH")
+
+  assert asia_high.swept is True
+  assert asia_high.swept_ts == pd.Timestamp("2026-07-10 08:00", tz="UTC")
+  assert asia_low.swept is False
+  assert any(level.name == "LONDON_H" and level.price == 121.0 for level in levels)
+  assert any(level.name == "LONDON_L" and level.price == 95.0 for level in levels)
+  assert any(level.name == "NY_H" and level.price == 118.0 for level in levels)
+  assert any(level.name == "NY_L" and level.price == 94.0 for level in levels)
+  assert pdh.price == 130.0
+  assert pdh.ts == pd.Timestamp("2026-07-10 22:30", tz="UTC")
+  assert previous_week_levels(df) == []
+
+
+def test_dealing_range_classifies_discount_and_eq():
+  swings = [
+    Swing(0, "low", 100.0),
+    Swing(1, "high", 200.0),
+  ]
+
+  discount = dealing_range(swings, 130.0)
+  eq = dealing_range(swings, 150.0)
+
+  assert discount is not None
+  assert discount.position == 0.3
+  assert discount.zone == "discount"
+  assert eq is not None
+  assert eq.zone == "eq"
+
+
+def test_liquidity_grab_grade_a_and_inducement_score_bonus():
+  df = _df([
+    (102, 103, 101, 102),
+    (100, 103, 99, 102),
+    (102, 104, 101, 103),
+    (103, 107, 102, 106),
+  ])
+  atr = pd.Series([1.0] * len(df), index=df.index)
+  pool = Pool("sell", 100.0, 0.1, 2)
+  zone = Zone(99.5, 101.0, "demand", source="supply_demand")
+  grabs = liquidity_grabs(
+    df,
+    [pool],
+    [Leg(2, 3, "up", 5.0)],
+    [zone],
+    atr,
+    sweep_body_frac=0.5,
+    sweep_react_bars=3,
+    inducement_band_atr=0.3,
+  )
+
+  assert len(grabs) == 1
+  assert grabs[0].grade == "A"
+  assert grabs[0].displacement is True
+  assert grabs[0].inducement is True
+
+  scored = score_zones([zone], [], [pool], round_step=0, grabs=grabs)[0]
+  assert "sweep A" in scored.score_reasons
+
+
+def test_liquidity_grab_grade_b_without_displacement():
+  df = _df([
+    (102, 103, 101, 102),
+    (100, 103, 99, 102),
+    (102, 103, 101, 102),
+  ])
+  pool = Pool("sell", 100.0, 0.1, 2)
+
+  grabs = liquidity_grabs(df, [pool], legs=[])
+
+  assert len(grabs) == 1
+  assert grabs[0].grade == "B"
+  assert grabs[0].displacement is False
+
+
+def test_breaker_blocks_close_through_flips_and_wick_does_not():
+  ob = Zone(
+    100,
+    102,
+    "demand",
+    origin_index=0,
+    source="order_block",
+    break_kind="BOS",
+  )
+  violated = _df([
+    (101, 102, 100, 101),
+    (101, 103, 99, 101),
+    (101, 102, 99, 99.5),
+  ])
+  wick_only = _df([
+    (101, 102, 100, 101),
+    (101, 103, 99, 101),
+  ])
+
+  zones = breaker_blocks([ob], violated)
+  dead = next(zone for zone in zones if zone.source == "order_block")
+  breaker = next(zone for zone in zones if zone.source == "breaker")
+
+  assert dead.mitigated is True
+  assert dead.touches == 1
+  assert breaker.side == "supply"
+  assert breaker.low == 100
+  assert breaker.high == 102
+  assert breaker.origin_index == 2
+  assert [zone.source for zone in breaker_blocks([ob], wick_only)] == ["order_block"]
+
+
+def test_score_zones_rewards_session_level_and_discount_position():
+  zone = Zone(100, 101, "demand", source="supply_demand")
+  ts = pd.Timestamp("2026-07-10 02:00", tz="UTC")
+
+  strong = score_zones(
+    [zone],
+    [],
+    [],
+    round_step=0,
+    session_levels=[SessionLevel("ASIA_L", 100.2, ts, swept=False)],
+    dealing_range=DealingRange(high=120, low=90, eq=105, position=0.33, zone="discount"),
+  )[0]
+  weak = score_zones(
+    [zone],
+    [],
+    [],
+    round_step=0,
+    dealing_range=DealingRange(high=105, low=80, eq=92.5, position=0.8, zone="premium"),
+  )[0]
+
+  assert strong.score > weak.score
+  assert "ASIA_L" in strong.score_reasons
+  assert "discount" in strong.score_reasons
+
+
 def test_price_only_momentum_bull_and_neutral():
   bull = _df([
     (100, 103, 99.8, 102.8),
@@ -327,11 +517,13 @@ def test_analyze_assembles_per_tf_outputs_and_htf_bias():
 
 def test_analysis_modules_have_no_delivery_or_state_imports():
   import app.analysis as analysis
+  import app.dealing_range as dealing_range_module
   import app.levels as levels
   import app.liquidity as liquidity
   import app.momentum as momentum_module
   import app.pa_math as pa_math
   import app.pa_types as pa_types
+  import app.session_liquidity as session_liquidity
   import app.structure as structure
   import app.swings as swings_module
   import app.zones as zones
@@ -344,11 +536,13 @@ def test_analysis_modules_have_no_delivery_or_state_imports():
   }
   modules = [
     analysis,
+    dealing_range_module,
     levels,
     liquidity,
     momentum_module,
     pa_math,
     pa_types,
+    session_liquidity,
     structure,
     swings_module,
     zones,
