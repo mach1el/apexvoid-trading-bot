@@ -239,6 +239,40 @@ def test_confirmation_rejection_is_required():
   assert detectors.trend_pullback(confirmed) is not None
 
 
+def test_trend_pullback_prefers_best_scored_zone_over_nearest_zone():
+  df = _buy_rejection_df()
+  ctx = _ctx(
+    df,
+    zones=[
+      Zone(
+        106,
+        107,
+        "demand",
+        source="bullish_fvg",
+        score=2,
+        score_reasons=["FVG"],
+      ),
+      Zone(
+        103,
+        105,
+        "demand",
+        source="order_block",
+        break_kind="BOS",
+        score=9,
+        score_reasons=["fresh", "OB", "HTF zone"],
+      ),
+    ],
+  )
+
+  result = detectors.trend_pullback(ctx)
+
+  assert result is not None
+  assert result.entry_zone.low == 103
+  assert result.entry_zone.high == 105
+  assert result.confluence == 3
+  assert result.reasons[1:4] == ["fresh", "OB", "HTF zone"]
+
+
 @pytest.mark.parametrize(("detector", "ctx_factory", "_setup"), SETUPS)
 def test_named_setup_returns_none_in_recent_mid_range(detector, ctx_factory, _setup):
   mid = _df([
