@@ -209,5 +209,10 @@ async def test_scanner_records_analysis_status_without_owner(monkeypatch):
   assert status["frames"] == {"M15": 1, "M30": 1, "M5": 1}
   assert status["detected"][0]["setup"] == "Trend Pullback"
   assert status["detected"][0]["current_price"] == 4103.0
-  assert status["detected"][0]["entry_zone"] == {"low": 4098, "high": 4102}
+  assert status["detected"][0]["entry_zone"] == {
+    "low": 4098,
+    "high": 4102,
+    "score": 0.0,
+    "score_reasons": [],
+  }
   assert status["sent"] == 0

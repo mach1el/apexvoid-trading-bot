@@ -1,13 +1,19 @@
 import pandas as pd
 
-from app.analysis import AnalysisSettings, analyze
+from app.analysis import (
+  AnalysisSettings,
+  TimeframeAnalysis,
+  _apply_mtf_zone_scores,
+  _htf_bias,
+  analyze,
+)
 from app.levels import key_levels
 from app.liquidity import liquidity_grabs, liquidity_pools
 from app.momentum import momentum
-from app.pa_types import Break, Leg, Swing
+from app.pa_types import Break, Leg, Level, Pool, Swing, Zone
 from app.structure import market_structure, structure_breaks
 from app.swings import find_swings
-from app.zones import mark_mitigation, order_blocks
+from app.zones import mark_mitigation, merge_zones, order_blocks, score_zones
 
 
 def _df(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
@@ -110,6 +116,134 @@ def test_order_block_created_by_bos_and_later_mitigated():
   stamped = mark_mitigation(zones, df)[0]
   assert stamped.mitigated is True
   assert stamped.touches == 1
+
+
+def test_mark_mitigation_respects_asof_cutoff():
+  df = _df([
+    (100, 104, 99, 103),
+    (103, 105, 102, 104),
+    (104, 106, 100, 105),
+  ])
+  zone = Zone(100, 101, "demand", origin_index=0, source="order_block")
+
+  as_of_previous = mark_mitigation([zone], df, cutoff=len(df) - 1)[0]
+  full_history = mark_mitigation([zone], df)[0]
+
+  assert as_of_previous.touches == 0
+  assert as_of_previous.mitigated is False
+  assert full_history.touches == 1
+  assert full_history.mitigated is True
+
+
+def test_merge_zones_combines_overlapping_same_side_sources():
+  merged = merge_zones([
+    Zone(
+      100,
+      104,
+      "demand",
+      origin_index=2,
+      source="order_block",
+      break_kind="BOS",
+      break_index=4,
+    ),
+    Zone(102, 105, "demand", origin_index=3, source="bullish_fvg"),
+    Zone(110, 112, "supply", origin_index=1, source="supply_demand"),
+  ])
+
+  demand = [zone for zone in merged if zone.side == "demand"]
+  assert len(demand) == 1
+  assert demand[0].low == 100
+  assert demand[0].high == 105
+  assert demand[0].sources == ["order_block", "bullish_fvg"]
+  assert demand[0].source == "order_block"
+  assert demand[0].break_kind == "BOS"
+  assert [zone.side for zone in merged].count("supply") == 1
+
+
+def test_score_zones_prefers_fresh_ob_round_level_liquidity_and_htf():
+  strong = Zone(
+    4099,
+    4101,
+    "demand",
+    source="order_block",
+    break_kind="BOS",
+    touches=0,
+  )
+  weak = Zone(4104, 4105, "demand", source="bullish_fvg", touches=2)
+  htf = Zone(4098, 4102, "demand", source="supply_demand")
+
+  scored = score_zones(
+    [weak, strong],
+    [Level(4100, "reaction", touches=3, band=1.0)],
+    [Pool("sell", 4098.8, 0.2, touches=2)],
+    round_step=5,
+    htf_zones=[htf],
+  )
+
+  assert scored[0].low == 4099
+  assert scored[0].score > scored[1].score
+  assert scored[0].score >= 13
+  assert {"fresh", "OB", "key level", "round 4100", "liquidity pool", "HTF zone"} <= set(
+    scored[0].score_reasons
+  )
+
+
+def _tf_item(
+  zones: list[Zone],
+  *,
+  structure: str = "range",
+  momentum_value: str = "neutral",
+) -> TimeframeAnalysis:
+  df = _df([(100, 101, 99, 100)])
+  return TimeframeAnalysis(
+    df=df,
+    atr=pd.Series([1.0], index=df.index),
+    swings=[],
+    structure=structure,
+    breaks=[],
+    key_levels=[],
+    legs=[],
+    supply_demand_zones=[],
+    order_blocks=[zone for zone in zones if "order_block" in zone.sources],
+    flip_zones=[],
+    fvg_zones=[],
+    zones=zones,
+    liquidity_pools=[],
+    liquidity_grabs=[],
+    momentum=momentum_value,
+  )
+
+
+def test_mtf_second_pass_adds_htf_zone_score_to_lower_tf():
+  lower = Zone(
+    100,
+    101,
+    "demand",
+    source="order_block",
+    break_kind="BOS",
+  )
+  higher = Zone(99, 102, "demand", source="supply_demand")
+
+  updated = _apply_mtf_zone_scores(
+    {
+      "M5": _tf_item([lower]),
+      "M30": _tf_item([higher]),
+    },
+    AnalysisSettings(round_step=0),
+  )
+
+  scored = updated["M5"].zones[0]
+  assert scored.score == 9
+  assert "HTF zone" in scored.score_reasons
+  assert updated["M5"].order_blocks == [scored]
+
+
+def test_htf_bias_fallback_is_deterministic_by_timeframe_rank():
+  low_tf = _tf_item([], structure="up", momentum_value="bull")
+  high_tf = _tf_item([], structure="down", momentum_value="bear")
+
+  assert _htf_bias({"M5": low_tf, "M30": high_tf}, []) == "down"
+  assert _htf_bias({"M30": high_tf, "M5": low_tf}, []) == "down"
 
 
 def test_key_levels_cluster_repeated_swings_and_drop_lone_touch():
