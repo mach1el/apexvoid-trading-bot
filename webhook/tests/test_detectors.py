@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from app import detectors
+from app.pa_types import DealingRange, Grab, Pool, SessionLevel
 from app.structure import Level, Swing, Zone
 
 
@@ -33,6 +34,9 @@ def _ctx(
   equal_levels: list[Level] | None = None,
   zones: list[Zone] | None = None,
   swings: list[Swing] | None = None,
+  grabs: list[Grab] | None = None,
+  session_levels: list[SessionLevel] | None = None,
+  dealing_range: DealingRange | None = None,
   indicator_set: detectors.IndicatorSet | None = None,
 ) -> detectors.DetectionContext:
   tf = "M5"
@@ -44,6 +48,9 @@ def _ctx(
     fvg_zones=[],
     order_blocks=[],
     zones=zones or [],
+    liquidity_grabs=grabs or [],
+    session_levels=session_levels or [],
+    dealing_range=dealing_range,
   )
   return detectors.DetectionContext(
     symbol="XAU",
@@ -111,6 +118,9 @@ def _snap_back_ctx() -> detectors.DetectionContext:
   return _ctx(
     df,
     zones=[Zone(103, 105, "demand", source="supply_demand")],
+    grabs=[
+      Grab(Pool("sell", 103, 0.1, 2), 4, "bull", df.index[4], "B"),
+    ],
     indicator_set=_indicators(df, atr=2.5),
   )
 
@@ -143,6 +153,9 @@ def _fade_scalp_ctx() -> detectors.DetectionContext:
     df,
     levels=[Level(105, "reaction")],
     equal_levels=[Level(105, "equal_low", touches=2)],
+    grabs=[
+      Grab(Pool("sell", 105, 0.1, 2), 4, "bull", df.index[4], "B"),
+    ],
   )
 
 
@@ -274,18 +287,33 @@ def test_trend_pullback_prefers_best_scored_zone_over_nearest_zone():
 
 
 @pytest.mark.parametrize(("detector", "ctx_factory", "_setup"), SETUPS)
-def test_named_setup_returns_none_in_recent_mid_range(detector, ctx_factory, _setup):
-  mid = _df([
-    (100, 110, 90, 100, 100),
-    (100, 110, 90, 100, 100),
-    (100, 110, 90, 100, 100),
-    (100, 110, 90, 100, 100),
-    (100, 110, 90, 100, 100),
-  ])
+def test_named_setup_returns_none_in_dealing_range_eq(detector, ctx_factory, _setup):
   ctx = ctx_factory()
-  ctx = replace(ctx, frames={"M5": mid}, indicators={"M5": _indicators(mid)})
+  structure = replace(
+    ctx.structures["M5"],
+    dealing_range=DealingRange(high=110, low=90, eq=100, position=0.5, zone="eq"),
+  )
+  ctx = replace(ctx, structures={"M5": structure})
 
   assert detector(ctx) is None
+
+
+def test_pd_gate_strict_rejects_buy_at_upper_eq_edge():
+  st = detectors.StructureSet(
+    swings=[],
+    bias="up",
+    levels=[],
+    equal_levels=[],
+    fvg_zones=[],
+    order_blocks=[],
+    dealing_range=DealingRange(high=200, low=100, eq=150, position=0.55, zone="eq"),
+  )
+
+  assert not detectors._pd_gate(
+    st,
+    "BUY",
+    detectors.DetectorSettings(strict_pd_gate=True),
+  )
 
 
 @pytest.mark.parametrize(("detector", "ctx_factory", "_setup"), SETUPS)
