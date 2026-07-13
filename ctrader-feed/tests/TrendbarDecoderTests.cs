@@ -26,4 +26,11 @@ public sealed class TrendbarDecoderTests
     Assert.Equal(4103.45m, bar.Close);
     Assert.Equal(77, bar.Volume);
   }
+
+  [Fact]
+  public void OpenApiPriceDecodeUsesFixedFeedScale()
+  {
+    Assert.Equal(4052.37m, OpenApiPrice.Decode(405237000m));
+    Assert.Equal(4052.48m, OpenApiPrice.Decode(405248000m));
+  }
 }
