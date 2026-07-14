@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pandas as pd
 import pytest
 
+from app.analysis import Regime
 from app import broadcast, dedup, redis_state, scanner
 from app.ohlc_source import RedisOHLCSource
 from app.structure import Zone
@@ -315,6 +316,112 @@ async def test_scanner_digest_suppresses_overlap_and_only_claims_sent(monkeypatc
   assert await client.get(scanner._dedup_key("XAU", "M5", results[0])) == "1"
   assert await client.get(scanner._dedup_key("XAU", "M5", results[2])) == "1"
   assert await client.get(scanner._dedup_key("XAU", "M5", results[1])) is None
+
+
+@pytest.mark.asyncio
+async def test_scanner_zone_band_dedup_suppresses_cross_setup_ideas(monkeypatch):
+  client = redis_state.get_client()
+  notify = AsyncMock()
+  monkeypatch.setattr(scanner.settings, "scanner_symbols", "XAU")
+  monkeypatch.setattr(scanner.settings, "scanner_exec_tf", "M5")
+  monkeypatch.setattr(scanner.settings, "scanner_htf", "M30,M15")
+  monkeypatch.setattr(scanner.settings, "scanner_window", 500)
+  monkeypatch.setattr(scanner.settings, "scanner_alert_ttl", 7200)
+  monkeypatch.setattr(scanner.settings, "scanner_level_bucket", 20)
+  monkeypatch.setattr(scanner.settings, "zone_alert_ttl", 14400)
+  monkeypatch.setattr(scanner.settings, "telegram_owner_id", 4242)
+  monkeypatch.setattr(scanner.settings, "scanner_top_n", 1)
+
+  ctx = SimpleNamespace(
+    tf="M5",
+    htf_bias="up",
+    structures={"M30": SimpleNamespace(bias="up")},
+    frames={"M5": _frame()},
+    regime=Regime("chop", 4110, 4097, 3.0, ["fixture chop"]),
+  )
+  monkeypatch.setattr(
+    scanner,
+    "build_context",
+    lambda symbol, tf, frames, settings, htf_order: ctx,
+  )
+  result_a = scanner.DetectionResult(
+    "Fade Scalp",
+    "BUY",
+    4100.0,
+    Zone(4099, 4101, "demand"),
+    4103.0,
+    3,
+    ["HTF bias up", "range 4097-4110"],
+  )
+  result_b = scanner.DetectionResult(
+    "Break & Retest",
+    "BUY",
+    4101.0,
+    Zone(4099.4, 4100.6, "demand"),
+    4103.0,
+    2,
+    ["HTF bias up"],
+  )
+  result_far = scanner.DetectionResult(
+    "Zone Reaction",
+    "BUY",
+    4106.0,
+    Zone(4105, 4107, "demand"),
+    4108.0,
+    2,
+    ["HTF bias up"],
+  )
+  current = {"result": result_a}
+
+  def detector(received_ctx):
+    assert received_ctx is ctx
+    return current["result"]
+
+  first = await scanner._handle_event(
+    "XAU:M5:1",
+    source=StaticSource(),
+    client=client,
+    detectors=(detector,),
+    notify=notify,
+  )
+  current["result"] = result_b
+  same_band = await scanner._handle_event(
+    "XAU:M5:2",
+    source=StaticSource(),
+    client=client,
+    detectors=(detector,),
+    notify=notify,
+  )
+  current["result"] = result_far
+  far_band = await scanner._handle_event(
+    "XAU:M5:3",
+    source=StaticSource(),
+    client=client,
+    detectors=(detector,),
+    notify=notify,
+  )
+
+  assert first == [result_a]
+  assert same_band == []
+  assert far_band == [result_far]
+  assert notify.await_count == 2
+  first_text = notify.await_args_list[0].args[0]
+  assert "range-bound 4,097-4,110 (M5)" in first_text
+  assert await client.get(scanner._band_dedup_key("XAU", result_a)) == "1"
+  assert await client.get(scanner._dedup_key("XAU", "M5", result_b)) is None
+
+  await client.delete(scanner._band_dedup_key("XAU", result_a))
+  current["result"] = result_b
+  after_ttl = await scanner._handle_event(
+    "XAU:M5:4",
+    source=StaticSource(),
+    client=client,
+    detectors=(detector,),
+    notify=notify,
+  )
+
+  assert after_ttl == [result_b]
+  assert notify.await_count == 3
 
 
 @pytest.mark.asyncio

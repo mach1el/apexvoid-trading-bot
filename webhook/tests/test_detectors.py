@@ -4,8 +4,9 @@ from typing import Callable
 import pandas as pd
 import pytest
 
+from app.analysis import Regime
 from app import detectors
-from app.pa_types import DealingRange, Grab, Pool, SessionLevel
+from app.pa_types import Break, DealingRange, Grab, Pool, SessionLevel
 from app.structure import Level, Swing, Zone
 
 
@@ -34,10 +35,13 @@ def _ctx(
   equal_levels: list[Level] | None = None,
   zones: list[Zone] | None = None,
   swings: list[Swing] | None = None,
+  breaks: list[Break] | None = None,
   grabs: list[Grab] | None = None,
   session_levels: list[SessionLevel] | None = None,
   dealing_range: DealingRange | None = None,
   indicator_set: detectors.IndicatorSet | None = None,
+  regime: Regime | None = None,
+  settings: detectors.DetectorSettings | None = None,
 ) -> detectors.DetectionContext:
   tf = "M5"
   structure = detectors.StructureSet(
@@ -47,6 +51,7 @@ def _ctx(
     equal_levels=equal_levels or [],
     fvg_zones=[],
     order_blocks=[],
+    breaks=breaks or [],
     zones=zones or [],
     liquidity_grabs=grabs or [],
     session_levels=session_levels or [],
@@ -59,7 +64,8 @@ def _ctx(
     indicators={tf: indicator_set or _indicators(df)},
     structures={tf: structure},
     htf_bias=bias,
-    settings=detectors.DetectorSettings(confluence_floor=2),
+    settings=settings or detectors.DetectorSettings(confluence_floor=2),
+    regime=regime,
   )
 
 
@@ -159,6 +165,10 @@ def _fade_scalp_ctx() -> detectors.DetectionContext:
   )
 
 
+def _chop_regime(low: float = 100, high: float = 112) -> Regime:
+  return Regime("chop", high, low, 3.0, ["fixture chop"])
+
+
 SETUPS: list[
   tuple[
     Callable[[detectors.DetectionContext], detectors.DetectionResult | None],
@@ -199,6 +209,83 @@ def test_named_setup_triggers_only_when_confirmed_and_correct_side(
   )
   assert result.confluence >= 2
   _assert_correct_side(result)
+
+
+@pytest.mark.parametrize(
+  ("detector", "ctx_factory"),
+  [
+    (detectors.trend_pullback, _trend_pullback_ctx),
+    (detectors.break_retest, _break_retest_ctx),
+    (detectors.momentum_ride, _momentum_ride_ctx),
+  ],
+)
+def test_chop_regime_silences_trend_continuation_setups(detector, ctx_factory):
+  ctx = replace(ctx_factory(), regime=_chop_regime())
+  disabled = replace(
+    ctx,
+    settings=replace(ctx.settings, chop_filter_enabled=False),
+  )
+
+  assert detector(disabled) is not None
+  assert detector(ctx) is None
+
+
+def test_sell_impulse_at_range_bottom_is_muted_in_chop():
+  df = _df([
+    (110, 112, 108, 110, 100),
+    (109, 110, 104, 105, 100),
+    (105, 106, 102, 104, 100),
+    (104, 105, 101, 103, 100),
+    (103, 104, 98, 99, 100),
+  ])
+  ctx = _ctx(
+    df,
+    bias="down",
+    levels=[Level(100, "reaction", band=0.1)],
+    swings=[Swing(3, "low", 101), Swing(2, "high", 112)],
+    indicator_set=_indicators(df, atr=1.0),
+    regime=_chop_regime(98, 112),
+  )
+
+  assert detectors.momentum_ride(
+    replace(ctx, settings=replace(ctx.settings, chop_filter_enabled=False))
+  ) is not None
+  assert detectors.momentum_ride(ctx) is None
+
+
+def test_chop_fade_scalp_requires_edge_and_grade_a_sweep():
+  df = _sell_rejection_df()
+  top_edge = _ctx(
+    df,
+    bias="down",
+    equal_levels=[Level(109, "equal_high", touches=2)],
+    grabs=[Grab(Pool("buy", 109, 0.1, 2), 4, "bear", df.index[4], "A")],
+    regime=_chop_regime(100, 112),
+  )
+  grade_b = _ctx(
+    df,
+    bias="down",
+    equal_levels=[Level(109, "equal_high", touches=2)],
+    grabs=[Grab(Pool("buy", 109, 0.1, 2), 4, "bear", df.index[4], "B")],
+    regime=_chop_regime(100, 112),
+  )
+  mid_range = _ctx(
+    df,
+    bias="down",
+    equal_levels=[Level(106, "equal_high", touches=2)],
+    grabs=[Grab(Pool("buy", 106, 0.1, 2), 4, "bear", df.index[4], "A")],
+    regime=_chop_regime(100, 112),
+  )
+
+  result = detectors.fade_scalp(top_edge)
+
+  assert result is not None
+  assert result.direction == "SELL"
+  assert result.reasons[0] == "HTF bias down"
+  assert "sweep A" in result.reasons
+  assert "range 100-112" in result.reasons
+  assert detectors.fade_scalp(grade_b) is None
+  assert detectors.fade_scalp(mid_range) is None
 
 
 def test_wrong_side_level_fallback_is_gone_for_sell_and_buy():
@@ -408,6 +495,7 @@ def _counter_ctx(
   zone: Zone | None = None,
   zones: list[Zone] | None = None,
   levels: list[Level] | None = None,
+  breaks: list[Break] | None = None,
   grabs: list[Grab] | None = None,
   session_levels: list[SessionLevel] | None = None,
   position: float = 0.2,
@@ -419,6 +507,7 @@ def _counter_ctx(
     bias="down",
     zones=zones if zones is not None else ([zone] if zone is not None else []),
     levels=levels,
+    breaks=breaks,
     grabs=grabs,
     session_levels=session_levels,
     dealing_range=DealingRange(high=150, low=100, eq=125, position=position, zone="discount"),
@@ -454,6 +543,55 @@ def test_counter_reaction_requires_fresh_scored_zone_sweep_and_extreme_pd():
   assert detectors.zone_reaction(_counter_ctx(zone=zone, grabs=[])) is None
   assert detectors.zone_reaction(_counter_ctx(zone=zone, grabs=[grab], position=0.4)) is None
   assert detectors.zone_reaction(_counter_ctx(zone=zone, grabs=[grab], allow=False)) is None
+
+
+def test_chop_zone_reaction_requires_edge_and_grade_a_sweep():
+  df = _buy_rejection_df()
+  edge_zone = Zone(
+    101,
+    103,
+    "demand",
+    source="supply_demand",
+    score=11,
+    score_reasons=["fresh", "S/D"],
+  )
+  edge_grab = Grab(Pool("sell", 102, 0.1, 2), 4, "bull", df.index[4], "A")
+  edge_ctx = replace(
+    _counter_ctx(zone=edge_zone, grabs=[edge_grab]),
+    regime=_chop_regime(100, 112),
+  )
+
+  result = detectors.zone_reaction(edge_ctx)
+
+  assert result is not None
+  assert result.direction == "BUY"
+  assert "sweep A" in result.reasons
+  assert "range 100-112" in result.reasons
+
+  mid_zone = replace(edge_zone, bottom=105, top=107)
+  mid_ctx = replace(
+    _counter_ctx(
+      zone=mid_zone,
+      grabs=[Grab(Pool("sell", 106, 0.1, 2), 4, "bull", df.index[4], "A")],
+    ),
+    regime=_chop_regime(100, 112),
+  )
+  assert detectors.zone_reaction(mid_ctx) is None
+
+  grade_b_ctx = replace(
+    _counter_ctx(
+      zone=edge_zone,
+      breaks=[Break("CHoCH", "up", 108, 4, df.index[4])],
+      grabs=[Grab(Pool("sell", 102, 0.1, 2), 4, "bull", df.index[4], "B")],
+    ),
+    regime=_chop_regime(100, 112),
+  )
+  legacy = replace(
+    grade_b_ctx,
+    settings=replace(grade_b_ctx.settings, chop_filter_enabled=False),
+  )
+  assert detectors.zone_reaction(legacy) is not None
+  assert detectors.zone_reaction(grade_b_ctx) is None
 
 
 def test_counter_swing_requires_fresh_htf_order_block():
