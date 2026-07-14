@@ -1,11 +1,14 @@
 import pandas as pd
+import pytest
 
 from app.analysis import (
   AnalysisSettings,
+  Regime,
   TimeframeAnalysis,
   _apply_mtf_zone_scores,
   _htf_bias,
   analyze,
+  regime,
 )
 from app.dealing_range import dealing_range
 from app.levels import key_levels
@@ -380,6 +383,69 @@ def test_dealing_range_classifies_discount_and_eq():
   assert discount.zone == "discount"
   assert eq is not None
   assert eq.zone == "eq"
+
+
+def test_regime_marks_tight_exec_range_as_chop():
+  df = _df([(105, 106, 104, 105)] * 24)
+  range_ = DealingRange(high=110, low=100, eq=105, position=0.5, zone="eq")
+
+  result = regime(
+    df,
+    pd.Series([3.0] * len(df), index=df.index),
+    "up",
+    range_,
+    AnalysisSettings(chop_range_atr=4.0, chop_lookback=24),
+  )
+
+  assert result == Regime(
+    "chop",
+    110,
+    100,
+    result.height_atr,
+    result.reasons,
+  )
+  assert result.height_atr == pytest.approx(10 / 3)
+  assert any(reason.startswith("range height") for reason in result.reasons)
+
+
+def test_regime_marks_contained_range_structure_as_chop():
+  rows = [
+    (105, 108, 102, close)
+    for close in ([104, 106, 105, 103, 107, 106] * 4)
+  ]
+  df = _df(rows)
+  range_ = DealingRange(high=110, low=100, eq=105, position=0.5, zone="eq")
+
+  result = regime(
+    df,
+    pd.Series([1.0] * len(df), index=df.index),
+    "range",
+    range_,
+    AnalysisSettings(chop_range_atr=4.0, chop_lookback=24),
+  )
+
+  assert result.kind == "chop"
+  assert any("range structure held" in reason for reason in result.reasons)
+
+
+def test_regime_keeps_expanded_breakout_as_trend():
+  rows = [(105, 108, 102, 105)] * 22 + [
+    (109, 113, 108, 111),
+    (111, 116, 110, 114),
+  ]
+  df = _df(rows)
+  range_ = DealingRange(high=110, low=100, eq=105, position=1.0, zone="premium")
+
+  result = regime(
+    df,
+    pd.Series([1.0] * len(df), index=df.index),
+    "range",
+    range_,
+    AnalysisSettings(chop_range_atr=4.0, chop_lookback=24),
+  )
+
+  assert result.kind == "trend"
+  assert result.reasons == ["range expanded or broke edge"]
 
 
 def test_liquidity_grab_grade_a_and_inducement_score_bonus():
