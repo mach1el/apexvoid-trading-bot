@@ -164,6 +164,25 @@ async def test_partial_close_keeps_close_button(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sl_partial_close_books_negative_pips(monkeypatch):
+  do_close = AsyncMock(return_value={
+    "ok": True, "row": {"closed": False, "remaining": 0.5},
+  })
+  monkeypatch.setattr(telegram, "do_close", do_close)
+  cb = _cb("c1:3:0:-120:50", html="⚠️ NEAR SL | #2")
+
+  await telegram.handle_close_book(cb)
+
+  args = do_close.await_args.args[0]
+  assert args["pips"] == -120
+  text = cb.message.edit_text.await_args.args[0]
+  assert "@ -120 pips" in text
+  assert "+-120" not in text
+  kb = cb.message.edit_text.await_args.kwargs["reply_markup"]
+  assert _codes(kb) == ["c0:3:0:-120"]
+
+
+@pytest.mark.asyncio
 async def test_manual_tp_attaches_close_button(monkeypatch):
   from app import trade_ops
   captured = {}
