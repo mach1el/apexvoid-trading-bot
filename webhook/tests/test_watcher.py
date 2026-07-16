@@ -265,6 +265,9 @@ async def test_sl_hit_stops_further_alerts(monkeypatch):
   fanout.assert_awaited_once()
   _, render = fanout.await_args.args
   assert render("vip").startswith("⚠️ <b>NEAR SL</b>")
+  markup_fn = fanout.await_args.kwargs["markup_fn"]
+  assert markup_fn("public") is None
+  assert markup_fn("vip").inline_keyboard[0][0].callback_data == "c0:3:0:-120"
   assert (await redis_state.get_progress(3))["sl"] is True
 
 
