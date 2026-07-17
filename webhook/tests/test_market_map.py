@@ -552,8 +552,9 @@ def test_scalp_rails_are_near_sorted_deduplicated_and_rendered():
     datetime(2026, 7, 17, 5, 0, tzinfo=timezone.utc),
     _cfg(),
   )
-  assert "\nSCALP\n" in text
+  assert "\n⚡ SCALP\n" in text
   assert {rail.direction for rail in market_map.rails} == {"BUY", "SELL"}
+  assert "🟢 BUY" in text and "🔴 SELL" in text
   assert "↑" not in text and "↓" not in text
 
 
