@@ -126,6 +126,34 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
+  public async Task RejectsLegacyDecisionScalpAsUnsupported()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson(
+      timeframe: "M1",
+      setup: "M1 Decision Scalp",
+      mode: "decision_scalp"
+    ));
+    var client = new FakeTradingClient();
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Processed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    Assert.Empty(client.Orders);
+    Assert.Contains(
+      store.Events,
+      item => item.Type == "rejected" && item.Message.Contains("unsupported")
+    );
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
   public async Task DrawnDownDemoBalanceUsesLowTierInsteadOfDisablingTrading()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -251,8 +279,8 @@ public sealed class AutoTradeEngineTests
 
   private static string CandidateJson(
     string timeframe = "M1",
-    string setup = "M1 Decision Scalp",
-    string mode = "decision_scalp"
+    string setup = "Auto Range Scalp",
+    string mode = "auto_range_scalp"
   ) => JsonSerializer.Serialize(new
   {
     version = 1,
