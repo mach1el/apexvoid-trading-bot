@@ -70,7 +70,7 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
-  public async Task OpensEnabledM1MomentumScalpCandidate()
+  public async Task RejectsMomentumCandidateAsUnsupported()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(CandidateJson(
@@ -79,34 +79,29 @@ public sealed class AutoTradeEngineTests
       mode: "momentum_scalp"
     ));
     var client = new FakeTradingClient();
-    var engine = new AutoTradeEngine(
-      Options(fastScalpEnabled: true),
-      store,
-      () => Now,
-      _ => { }
-    );
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
     await engine.ObserveSpotAsync(
       new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
       cts.Token
     );
 
     var run = engine.RunSessionAsync(client, Symbol, cts.Token);
-    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    await store.Processed.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-    Assert.Single(client.Orders);
+    Assert.Empty(client.Orders);
+    Assert.Contains(
+      store.Events,
+      item => item.Type == "rejected" && item.Message.Contains("unsupported")
+    );
     cts.Cancel();
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
   }
 
   [Fact]
-  public async Task RejectsM1MomentumScalpWhenFastGateIsDisabled()
+  public async Task RejectsRangeScalpOutsideM5AsUnsupported()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    var store = new FakeAutoTradeStore(CandidateJson(
-      timeframe: "M1",
-      setup: "M1 Momentum Scalp",
-      mode: "momentum_scalp"
-    ));
+    var store = new FakeAutoTradeStore(CandidateJson(timeframe: "M1"));
     var client = new FakeTradingClient();
     var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
     await engine.ObserveSpotAsync(
@@ -222,7 +217,7 @@ public sealed class AutoTradeEngineTests
     Assert.Empty(client.Orders);
   }
 
-  private static AutoTradeOptions Options(bool fastScalpEnabled = false) => new(
+  private static AutoTradeOptions Options() => new(
     Enabled: true,
     DryRun: false,
     ExpectedBroker: "Fusion",
@@ -234,7 +229,6 @@ public sealed class AutoTradeEngineTests
     MaxEntryDistancePips: 10,
     MaxDailyTrades: 6,
     MinConfluence: 2,
-    FastScalpEnabled: fastScalpEnabled,
     PollMilliseconds: 10,
     CandidateStream: "auto_trade:candidates",
     EventStream: "auto_trade:events",
