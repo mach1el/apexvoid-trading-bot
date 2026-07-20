@@ -26,16 +26,17 @@ async def test_pause_resume_and_status(monkeypatch):
   await auto_trade_ops.set_auto_trade_paused(True)
   client = redis_state.get_client()
   await client.set(
-    "auto_trade:last_m1_gate",
-    '{"state":"waiting_confirmation","zone":{"low":4016.5,"high":4017.5}}',
+    "auto_trade:last_gate",
+    '{"state":"waiting_rejection","rail":{"role":"support","low":4016.5,"high":4017.5}}',
   )
   assert await client.get("auto_trade:paused") == "1"
   text = await auto_trade_ops.auto_trade_status_text()
   assert "demo trading" in text
   assert "paused" in text
   assert "0/6" in text
-  assert "M1 confirmation · M5/M15 decision zone" in text
-  assert "waiting_confirmation" in text
+  assert "independent M1 range scalp · raw M5/M15 rails" in text
+  assert "waiting_rejection" in text
+  assert "support" in text
   assert "4,016.50–4,017.50" in text
   await auto_trade_ops.set_auto_trade_paused(False)
   assert await client.get("auto_trade:paused") is None
