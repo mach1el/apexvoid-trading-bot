@@ -17,16 +17,25 @@ public sealed class VolumePlannerTests
   );
 
   [Theory]
-  [InlineData(499, 0)]
-  [InlineData(500, 0.08)]
-  [InlineData(999, 0.08)]
-  [InlineData(1000, 0.12)]
-  [InlineData(1999, 0.12)]
-  [InlineData(2000, 0.20)]
-  [InlineData(4999, 0.20)]
-  [InlineData(5000, 0.30)]
-  [InlineData(25000, 0.30)]
-  public void SelectsConfiguredBalanceTier(double balance, double expectedLots)
+  [InlineData(199, 0)]
+  [InlineData(200, 0.02)]
+  [InlineData(499, 0.04)]
+  [InlineData(500, 0.05)]
+  [InlineData(875, 0.09)]
+  [InlineData(999, 0.10)]
+  [InlineData(1000, 0.11)]
+  [InlineData(1500, 0.16)]
+  [InlineData(2000, 0.21)]
+  [InlineData(2500, 0.26)]
+  [InlineData(3000, 0.31)]
+  [InlineData(4000, 0.33)]
+  [InlineData(4999, 0.35)]
+  [InlineData(5000, 0.36)]
+  [InlineData(10000, 0.36)]
+  public void MapsBalanceBandsAndFloorsToOneCentLotStep(
+    double balance,
+    double expectedLots
+  )
   {
     Assert.Equal(
       Convert.ToDecimal(expectedLots),
@@ -34,39 +43,71 @@ public sealed class VolumePlannerTests
     );
   }
 
-  [Theory]
-  [InlineData(0.12, 1200)]
-  [InlineData(0.08, 800)]
-  [InlineData(0.20, 2000)]
-  [InlineData(0.30, 3000)]
-  public void ConvertsLotsToBrokerVolume(double lots, long expected)
+  [Fact]
+  public void ConvertsLotsToBrokerVolume()
   {
+    Assert.Equal(200, VolumePlanner.VolumeForLots(0.02m, Symbol));
+    Assert.Equal(900, VolumePlanner.VolumeForLots(0.09m, Symbol));
+  }
+
+  [Theory]
+  [InlineData(200, new[] { 30, 90 }, new[] { 1, 3 })]
+  [InlineData(300, new[] { 30, 60, 90 }, new[] { 1, 2, 3 })]
+  [InlineData(400, new[] { 30, 60, 90, 120 }, new[] { 1, 2, 3, 4 })]
+  [InlineData(500, new[] { 30, 60, 90, 120, 200 }, new[] { 1, 2, 3, 4, 5 })]
+  public void AdaptsTargetsToAvailableBrokerSteps(
+    long volume,
+    int[] expectedTargets,
+    int[] expectedOrdinals
+  )
+  {
+    var plan = Plan(volume);
+
+    Assert.Equal(expectedTargets, plan.TargetsPips);
+    Assert.Equal(expectedOrdinals, plan.TargetOrdinals);
     Assert.Equal(
-      expected,
-      VolumePlanner.VolumeForLots(Convert.ToDecimal(lots), Symbol)
+      Enumerable.Repeat(100L, expectedTargets.Length),
+      plan.Slices
     );
   }
 
   [Fact]
-  public void SplitsPointTwelveAcrossFiveValidPartialCloses()
+  public void RejectsVolumeThatCannotSupportTwoExits()
   {
-    Assert.Equal([200, 200, 200, 200, 400], VolumePlanner.SplitFive(1200, Symbol));
+    var error = Assert.Throws<VolumePlanningException>(() => Plan(100));
+
+    Assert.Contains("minimum two broker-valid exits", error.Message);
   }
 
   [Fact]
-  public void SplitsLowBalanceTierAcrossFiveValidPartialCloses()
-  {
-    Assert.Equal([100, 100, 100, 100, 400], VolumePlanner.SplitFive(800, Symbol));
-  }
-
-  [Theory]
-  [InlineData(2000, 400)]
-  [InlineData(3000, 600)]
-  public void SplitsEvenTiersEqually(long volume, long slice)
+  public void WeightedLargestRemainderProducesExactSteps()
   {
     Assert.Equal(
-      Enumerable.Repeat(slice, 5),
-      VolumePlanner.SplitFive(volume, Symbol)
+      new long[] { 500, 500, 600, 400 },
+      VolumePlanner.SplitWeighted(2_000, Symbol, [25, 25, 30, 20])
     );
   }
+
+  [Fact]
+  public void RoundingProneWeightsStayWithinOneStepAndSumExactly()
+  {
+    var weights = new[] { 17, 19, 23, 41 };
+    var slices = VolumePlanner.SplitWeighted(2_300, Symbol, weights);
+
+    Assert.Equal(2_300, slices.Sum());
+    for (var index = 0; index < weights.Length; index++)
+    {
+      var actualSteps = (decimal)slices[index] / Symbol.StepVolume;
+      var idealSteps = 23m * weights[index] / weights.Sum();
+      Assert.True(Math.Abs(actualSteps - idealSteps) <= 1m);
+    }
+  }
+
+  private static TargetVolumePlan Plan(long volume) =>
+    VolumePlanner.BuildTargetPlan(
+      volume,
+      Symbol,
+      [30, 60, 90, 120, 200],
+      [20, 20, 20, 20, 20]
+    );
 }
