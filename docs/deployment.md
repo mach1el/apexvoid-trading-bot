@@ -50,8 +50,8 @@ sudo usermod -aG docker "$USER" && newgrp docker
 ## 3. Configure
 
 ```bash
-git clone <repo-url> xau-signal-bot
-cd xau-signal-bot
+git clone <repo-url> apexvoid-trading-bot
+cd apexvoid-trading-bot
 cp .env.example .env
 chmod 600 .env
 nano .env

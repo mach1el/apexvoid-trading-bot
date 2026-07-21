@@ -10,7 +10,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import telegram
+from app.bot import wiring
 
 OWNER = 424242
 
@@ -33,8 +33,8 @@ def _cb(data: str, uid: int = OWNER, html: str = "🎯 TP HIT | #2"):
 
 @pytest.fixture(autouse=True)
 def _owner(monkeypatch):
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", OWNER)
-  monkeypatch.setattr(telegram, "symbol_for_channel", lambda _cid: "XAU")
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", OWNER)
+  monkeypatch.setattr(wiring, "symbol_for_channel", lambda _cid: "XAU")
 
 
 def _codes(kb) -> list[str]:
@@ -44,10 +44,10 @@ def _codes(kb) -> list[str]:
 @pytest.mark.asyncio
 async def test_non_owner_is_rejected(monkeypatch):
   do_close = AsyncMock()
-  monkeypatch.setattr(telegram, "do_close", do_close)
+  monkeypatch.setattr(wiring, "do_close", do_close)
   cb = _cb("c1:3:1:90:100", uid=999)
 
-  await telegram.handle_close_book(cb)
+  await wiring.handle_close_book(cb)
 
   do_close.assert_not_awaited()
   cb.answer.assert_awaited_once()
@@ -58,13 +58,13 @@ async def test_non_owner_is_rejected(monkeypatch):
 async def test_menu_shows_only_valid_fractions(monkeypatch):
   # 50% already booked -> remaining 50% -> only 25% + Full are offered.
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "get_manual_signal",
     AsyncMock(return_value={"status": "open", "legs": [{"frac": 0.5}]}),
   )
   cb = _cb("c0:3:1:90")
 
-  await telegram.handle_close_menu(cb)
+  await wiring.handle_close_menu(cb)
 
   kb = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
   codes = _codes(kb)
@@ -79,13 +79,13 @@ async def test_menu_shows_only_valid_fractions(monkeypatch):
 @pytest.mark.asyncio
 async def test_menu_offers_90_percent_for_full_open_signal(monkeypatch):
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "get_manual_signal",
     AsyncMock(return_value={"status": "open", "legs": []}),
   )
   cb = _cb("c0:3:1:90")
 
-  await telegram.handle_close_menu(cb)
+  await wiring.handle_close_menu(cb)
 
   kb = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
   codes = _codes(kb)
@@ -95,21 +95,21 @@ async def test_menu_offers_90_percent_for_full_open_signal(monkeypatch):
 @pytest.mark.asyncio
 async def test_menu_includes_cancel_that_restores_close(monkeypatch):
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "get_manual_signal",
     AsyncMock(return_value={"status": "open", "legs": []}),
   )
   # Open the submenu -> it must offer a Cancel back-out.
   menu = _cb("c0:3:1:90")
-  await telegram.handle_close_menu(menu)
+  await wiring.handle_close_menu(menu)
   submenu = menu.message.edit_reply_markup.await_args.kwargs["reply_markup"]
   assert "cx:3:1:90" in _codes(submenu)
 
   # Pressing Cancel restores the single Close button and closes nothing.
   do_close = AsyncMock()
-  monkeypatch.setattr(telegram, "do_close", do_close)
+  monkeypatch.setattr(wiring, "do_close", do_close)
   cancel = _cb("cx:3:1:90")
-  await telegram.handle_close_cancel(cancel)
+  await wiring.handle_close_cancel(cancel)
 
   do_close.assert_not_awaited()
   kb = cancel.message.edit_reply_markup.await_args.kwargs["reply_markup"]
@@ -119,11 +119,11 @@ async def test_menu_includes_cancel_that_restores_close(monkeypatch):
 @pytest.mark.asyncio
 async def test_menu_on_closed_signal_removes_buttons(monkeypatch):
   monkeypatch.setattr(
-    telegram, "get_manual_signal", AsyncMock(return_value=None)
+    wiring, "get_manual_signal", AsyncMock(return_value=None)
   )
   cb = _cb("c0:3:1:90")
 
-  await telegram.handle_close_menu(cb)
+  await wiring.handle_close_menu(cb)
 
   cb.answer.assert_awaited_once()
   assert cb.message.edit_reply_markup.await_args.kwargs["reply_markup"] is None
@@ -134,10 +134,10 @@ async def test_full_close_books_and_finalizes(monkeypatch):
   do_close = AsyncMock(return_value={
     "ok": True, "row": {"closed": True, "net": 90},
   })
-  monkeypatch.setattr(telegram, "do_close", do_close)
+  monkeypatch.setattr(wiring, "do_close", do_close)
   cb = _cb("c1:3:1:90:100")
 
-  await telegram.handle_close_book(cb)
+  await wiring.handle_close_book(cb)
 
   args = do_close.await_args.args[0]
   assert args["sid"] == 3 and args["pips"] == 90 and args["frac"] is None
@@ -151,10 +151,10 @@ async def test_partial_close_keeps_close_button(monkeypatch):
   do_close = AsyncMock(return_value={
     "ok": True, "row": {"closed": False, "remaining": 0.5},
   })
-  monkeypatch.setattr(telegram, "do_close", do_close)
+  monkeypatch.setattr(wiring, "do_close", do_close)
   cb = _cb("c1:3:1:90:50")
 
-  await telegram.handle_close_book(cb)
+  await wiring.handle_close_book(cb)
 
   assert do_close.await_args.args[0]["frac"] == 0.5
   text = cb.message.edit_text.await_args.args[0]
@@ -168,10 +168,10 @@ async def test_sl_partial_close_books_negative_pips(monkeypatch):
   do_close = AsyncMock(return_value={
     "ok": True, "row": {"closed": False, "remaining": 0.5},
   })
-  monkeypatch.setattr(telegram, "do_close", do_close)
+  monkeypatch.setattr(wiring, "do_close", do_close)
   cb = _cb("c1:3:0:-120:50", html="⚠️ NEAR SL | #2")
 
-  await telegram.handle_close_book(cb)
+  await wiring.handle_close_book(cb)
 
   args = do_close.await_args.args[0]
   assert args["pips"] == -120
@@ -184,7 +184,7 @@ async def test_sl_partial_close_books_negative_pips(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manual_tp_attaches_close_button(monkeypatch):
-  from app import trade_ops
+  from app.signals import trade_ops
   captured = {}
 
   async def _fanout(sig, render_fn, sticker=None, markup_fn=None):
@@ -210,11 +210,11 @@ async def test_manual_tp_attaches_close_button(monkeypatch):
 @pytest.mark.asyncio
 async def test_book_on_stale_signal_answers_alert(monkeypatch):
   monkeypatch.setattr(
-    telegram, "do_close", AsyncMock(return_value={"ok": False})
+    wiring, "do_close", AsyncMock(return_value={"ok": False})
   )
   cb = _cb("c1:3:1:90:100")
 
-  await telegram.handle_close_book(cb)
+  await wiring.handle_close_book(cb)
 
   cb.answer.assert_awaited_once()
   assert cb.answer.await_args.kwargs.get("show_alert") is True

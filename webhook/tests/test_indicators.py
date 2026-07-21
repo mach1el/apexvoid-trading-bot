@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from app import indicators
+from app.analysis import indicators
 
 
 def _frame(closes: list[float]) -> pd.DataFrame:

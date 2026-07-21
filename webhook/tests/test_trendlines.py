@@ -3,10 +3,10 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from app.analysis import AnalysisSettings
-from app.pa_types import Swing, Zone
-from app.trendlines import Trendline, _dedup, trendlines, value_at
-from app.zones import TRENDLINE_SCORE, score_zones
+from app.analysis.engine import AnalysisSettings
+from app.analysis.types import Swing, Zone
+from app.analysis.trendlines import Trendline, _dedup, trendlines, value_at
+from app.analysis.zones import TRENDLINE_SCORE, score_zones
 
 
 def _line_df(length: int = 10) -> pd.DataFrame:

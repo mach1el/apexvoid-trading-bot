@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app import structure
+from app.analysis import structure
 
 
 def _df(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:

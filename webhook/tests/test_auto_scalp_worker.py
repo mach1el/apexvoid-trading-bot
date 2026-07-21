@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 import pandas as pd
 import pytest
 
-from app import auto_scalp_worker, redis_state, scanner
-from app.auto_scalp_gate import AutoScalpBox, AutoScalpDecision, AutoScalpRail
-from app.auto_scale_context import AutoScaleContext
+from app.autotrade import worker
+from app.persistence import redis_state
+from app.analysis import scanner
+from app.autotrade.gate import AutoScalpBox, AutoScalpDecision, AutoScalpRail
+from app.autotrade.scale_context import AutoScaleContext
 
 
 def _frame() -> pd.DataFrame:
@@ -76,18 +78,18 @@ def _scale_context(now: int) -> AutoScaleContext:
 async def test_worker_publishes_one_durable_auto_only_candidate(monkeypatch):
   client = redis_state.get_client()
   now = int(datetime.now(timezone.utc).timestamp())
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_enabled", True)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_stream", "auto_trade:test")
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_stream_maxlen", 100)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_candidate_ttl", 3600)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_min_confluence", 2)
-  monkeypatch.setattr(auto_scalp_worker, "event_in_window", AsyncMock(return_value=None))
-  spot = auto_scalp_worker.AutoTradeSpot(4017.2, now, True)
+  monkeypatch.setattr(worker.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_stream", "auto_trade:test")
+  monkeypatch.setattr(worker.settings, "auto_trade_stream_maxlen", 100)
+  monkeypatch.setattr(worker.settings, "auto_trade_candidate_ttl", 3600)
+  monkeypatch.setattr(worker.settings, "auto_trade_min_confluence", 2)
+  monkeypatch.setattr(worker, "event_in_window", AsyncMock(return_value=None))
+  spot = worker.AutoTradeSpot(4017.2, now, True)
 
-  first = await auto_scalp_worker._publish_candidate(
+  first = await worker._publish_candidate(
     client, "XAU", "1784552400", spot, _decision(), _scale_context(now)
   )
-  second = await auto_scalp_worker._publish_candidate(
+  second = await worker._publish_candidate(
     client, "XAU", "1784552400", spot, _decision(), _scale_context(now)
   )
 
@@ -111,7 +113,7 @@ async def test_worker_publishes_one_durable_auto_only_candidate(monkeypatch):
   assert payload["structure_swing"] == 4014.8
   assert payload["displacement_age_bars"] == 1
   assert payload["bos_direction"] == "up"
-  assert await client.exists(auto_scalp_worker._box_edge_key(
+  assert await client.exists(worker._box_edge_key(
     "XAU",
     "xau-8034-8050",
     "BUY",
@@ -122,31 +124,31 @@ async def test_worker_publishes_one_durable_auto_only_candidate(monkeypatch):
 async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
   client = redis_state.get_client()
   now = int(datetime.now(timezone.utc).timestamp())
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_enabled", True)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_symbols", "XAU")
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_stream", "auto_trade:test")
-  monkeypatch.setattr(auto_scalp_worker, "event_in_window", AsyncMock(return_value=None))
+  monkeypatch.setattr(worker.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_symbols", "XAU")
+  monkeypatch.setattr(worker.settings, "auto_trade_stream", "auto_trade:test")
+  monkeypatch.setattr(worker, "event_in_window", AsyncMock(return_value=None))
   source = AsyncMock()
   source.window = AsyncMock(return_value=_frame())
   monkeypatch.setattr(
-    auto_scalp_worker,
+    worker,
     "_load_spot",
-    AsyncMock(return_value=auto_scalp_worker.AutoTradeSpot(4017.2, now, True)),
+    AsyncMock(return_value=worker.AutoTradeSpot(4017.2, now, True)),
   )
   monkeypatch.setattr(
-    auto_scalp_worker,
+    worker,
     "evaluate_auto_scalp_gate",
     lambda frames, **kwargs: _decision(),
   )
   monkeypatch.setattr(
-    auto_scalp_worker,
+    worker,
     "build_auto_scale_context",
     lambda *args, **kwargs: _scale_context(now),
   )
   forming = AsyncMock()
   monkeypatch.setattr(scanner, "_handle_event", forming)
 
-  result = await auto_scalp_worker._handle_event(
+  result = await worker._handle_event(
     "XAU:M1:1784552400",
     source=source,
     client=client,
@@ -167,7 +169,7 @@ async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
 async def test_broken_box_is_retired_and_cannot_publish_again(monkeypatch):
   client = redis_state.get_client()
   monkeypatch.setattr(
-    auto_scalp_worker.settings,
+    worker.settings,
     "auto_trade_box_retire_seconds",
     3600,
   )
@@ -178,12 +180,12 @@ async def test_broken_box_is_retired_and_cannot_publish_again(monkeypatch):
     reasons=("accepted outside",),
   )
 
-  result = await auto_scalp_worker._apply_box_retirement(
+  result = await worker._apply_box_retirement(
     client,
     "XAU",
     broken,
   )
-  retired = await auto_scalp_worker._apply_box_retirement(
+  retired = await worker._apply_box_retirement(
     client,
     "XAU",
     candidate,
@@ -198,20 +200,20 @@ async def test_broken_box_is_retired_and_cannot_publish_again(monkeypatch):
 async def test_used_edge_rearms_only_after_midpoint_close():
   client = redis_state.get_client()
   decision = _decision()
-  key = auto_scalp_worker._box_edge_key(
+  key = worker._box_edge_key(
     "XAU",
     decision.box.box_id,
     "BUY",
   )
   await client.set(key, "1")
 
-  blocked = await auto_scalp_worker._apply_box_retirement(
+  blocked = await worker._apply_box_retirement(
     client,
     "XAU",
     decision,
     price=4017.0,
   )
-  rearmed = await auto_scalp_worker._apply_box_retirement(
+  rearmed = await worker._apply_box_retirement(
     client,
     "XAU",
     decision,
@@ -228,8 +230,8 @@ async def test_worker_ignores_forming_timeframe_and_scanner_still_ignores_m1(
   monkeypatch,
 ):
   client = redis_state.get_client()
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_symbols", "XAU")
-  assert await auto_scalp_worker._handle_event(
+  monkeypatch.setattr(worker.settings, "auto_trade_symbols", "XAU")
+  assert await worker._handle_event(
     "XAU:M5:1784552400",
     client=client,
   ) is None
@@ -246,30 +248,30 @@ async def test_worker_ignores_forming_timeframe_and_scanner_still_ignores_m1(
 @pytest.mark.asyncio
 async def test_candidate_fails_closed_on_news_missing_or_stale_spot(monkeypatch):
   client = redis_state.get_client()
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_enabled", True)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_stream", "auto_trade:test")
+  monkeypatch.setattr(worker.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_stream", "auto_trade:test")
   monkeypatch.setattr(
-    auto_scalp_worker,
+    worker,
     "event_in_window",
     AsyncMock(return_value={"title": "US CPI"}),
   )
   decision = _decision()
 
-  assert await auto_scalp_worker._publish_candidate(
+  assert await worker._publish_candidate(
     client,
     "XAU",
     "1",
-    auto_scalp_worker.AutoTradeSpot(4016.4, 1, True),
+    worker.AutoTradeSpot(4016.4, 1, True),
     decision,
   ) is None
-  assert await auto_scalp_worker._publish_candidate(
+  assert await worker._publish_candidate(
     client, "XAU", "2", None, decision
   ) is None
-  assert await auto_scalp_worker._publish_candidate(
+  assert await worker._publish_candidate(
     client,
     "XAU",
     "3",
-    auto_scalp_worker.AutoTradeSpot(4016.4, 1, False),
+    worker.AutoTradeSpot(4016.4, 1, False),
     decision,
   ) is None
   assert await client.xlen("auto_trade:test") == 0
@@ -278,22 +280,22 @@ async def test_candidate_fails_closed_on_news_missing_or_stale_spot(monkeypatch)
 @pytest.mark.asyncio
 async def test_non_candidate_decision_is_never_published(monkeypatch):
   client = redis_state.get_client()
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_enabled", True)
-  monkeypatch.setattr(auto_scalp_worker.settings, "auto_trade_stream", "auto_trade:test")
-  spot = auto_scalp_worker.AutoTradeSpot(4100.0, 1, True)
+  monkeypatch.setattr(worker.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_stream", "auto_trade:test")
+  spot = worker.AutoTradeSpot(4100.0, 1, True)
 
-  assert await auto_scalp_worker._publish_candidate(
+  assert await worker._publish_candidate(
     client, "XAU", "1", spot, AutoScalpDecision("waiting_for_touch")
   ) is None
   assert await client.xlen("auto_trade:test") == 0
 
 
 def test_worker_source_has_no_forming_scanner_market_map_or_telegram_import():
-  source = inspect.getsource(auto_scalp_worker)
+  source = inspect.getsource(worker)
   forbidden = (
-    "from app.scanner",
-    "from app.detectors",
-    "from app.market_map",
-    "from app.tg_core",
+    "from app.analysis.scanner",
+    "from app.analysis.detectors",
+    "from app.analysis.market_map",
+    "from app.bot.client",
   )
   assert all(item not in source for item in forbidden)

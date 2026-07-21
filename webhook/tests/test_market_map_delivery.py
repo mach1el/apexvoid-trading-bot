@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app import market_map_delivery
-from app.market_map import MapEntry, MarketMap, market_map_payload
+from app.analysis import market_map_delivery
+from app.analysis.market_map import MapEntry, MarketMap, market_map_payload
 
 
 def _map(lo: float = 4025.0, hi: float = 4028.0) -> MarketMap:

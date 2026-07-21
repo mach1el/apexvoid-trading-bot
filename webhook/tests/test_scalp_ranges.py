@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from app.scalp_ranges import build_scalp_structure
+from app.analysis.scalp_ranges import build_scalp_structure
 
 
 def _cfg(**overrides):

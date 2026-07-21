@@ -12,26 +12,28 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import dedup, telegram, trade_ops
-from app.reports import _round_lines, build_stats, format_review, format_stats, sparkline
+from app.persistence import store
+from app.bot import wiring
+from app.signals import trade_ops
+from app.signals.reports import _round_lines, build_stats, format_review, format_stats, sparkline
 
 
 @pytest.mark.asyncio
 async def test_reopen_inherits_original_stop_not_moved_sl():
-  await dedup.init_db()
-  src = await dedup.store_manual_signal(
+  await store.init_db()
+  src = await store.store_manual_signal(
     1, "BUY", 4100.0, 4105.0, 4088.0, [4130.0], symbol="XAU",
   )
   # TP1 → move stop to break-even (entry mid). sl is overwritten in place.
-  await dedup.update_sl(src["id"], 4102.5)
-  moved = await dedup.get_manual_signal(src["id"])
+  await store.update_sl(src["id"], 4102.5)
+  moved = await store.get_manual_signal(src["id"])
   assert moved["sl"] == 4102.5 and moved["original_sl"] == 4088.0
 
-  await dedup.close_leg(src["id"], 0)  # round must end before it can reopen
+  await store.close_leg(src["id"], 0)  # round must end before it can reopen
   result = await trade_ops.do_reopen({
     "sid": src["id"], "symbol": "XAU", "entry_override": None,
   })
-  round2 = await dedup.get_manual_signal(result["record"]["id"])
+  round2 = await store.get_manual_signal(result["record"]["id"])
   # Round 2 must start from the ORIGINAL stop, not the break-even one.
   assert round2["sl"] == 4088.0
   assert round2["original_sl"] == 4088.0
@@ -39,8 +41,8 @@ async def test_reopen_inherits_original_stop_not_moved_sl():
 
 @pytest.mark.asyncio
 async def test_reopen_rejects_open_signal():
-  await dedup.init_db()
-  src = await dedup.store_manual_signal(
+  await store.init_db()
+  src = await store.store_manual_signal(
     1, "BUY", 4100.0, 4105.0, 4088.0, [4130.0], symbol="XAU",
   )  # left OPEN on purpose
   result = await trade_ops.do_reopen({
@@ -49,7 +51,7 @@ async def test_reopen_rejects_open_signal():
   assert result["ok"] is False
   assert result["error"] == "still_open"
   # No re-entry round was created; the cluster is still just the source.
-  assert len(await dedup.get_signal_cluster(src["id"])) == 1
+  assert len(await store.get_signal_cluster(src["id"])) == 1
 
 
 def test_reports_risk_uses_original_stop():
@@ -70,7 +72,7 @@ async def _new_signal(
   setup_type: str = "ob-retest",
   confluence: int = 3,
 ) -> dict:
-  return await dedup.store_manual_signal(
+  return await store.store_manual_signal(
     ts,
     "BUY",
     4100.0,
@@ -87,16 +89,16 @@ async def test_reopen_creates_independent_root_linked_rounds(
   tmp_path,
   monkeypatch,
 ):
-  await dedup.init_db()
+  await store.init_db()
   source_rec = await _new_signal(1)
-  await dedup.close_leg(source_rec["id"], 70)
-  source_before = await dedup.get_manual_signal(source_rec["id"])
+  await store.close_leg(source_rec["id"], 70)
+  source_before = await store.get_manual_signal(source_rec["id"])
 
   send = AsyncMock(return_value=SimpleNamespace(message_id=801))
-  monkeypatch.setattr(telegram, "_send_with_retry", send)
-  first = await telegram._reopen_signal(source_rec["id"], None, None)
-  first_row = await dedup.get_manual_signal(first[0]["id"])
-  source_after = await dedup.get_manual_signal(source_rec["id"])
+  monkeypatch.setattr(wiring, "_send_with_retry", send)
+  first = await wiring._reopen_signal(source_rec["id"], None, None)
+  first_row = await store.get_manual_signal(first[0]["id"])
+  source_after = await store.get_manual_signal(source_rec["id"])
 
   assert source_after == source_before
   assert first_row["daily_seq"] == source_rec["daily_seq"] + 1
@@ -105,19 +107,19 @@ async def test_reopen_creates_independent_root_linked_rounds(
   assert first_row["setup_type"] == "ob-retest"
   assert "round 2 from #1" in first[1]
 
-  await dedup.close_leg(first_row["id"], 40)  # close round 2 before reopening it
+  await store.close_leg(first_row["id"], 40)  # close round 2 before reopening it
   send.return_value = SimpleNamespace(message_id=802)
-  second = await telegram._reopen_signal(first_row["id"], 4101.0, 4104.0)
-  second_row = await dedup.get_manual_signal(second[0]["id"])
+  second = await wiring._reopen_signal(first_row["id"], 4101.0, 4104.0)
+  second_row = await store.get_manual_signal(second[0]["id"])
 
   assert second_row["parent_id"] == source_rec["id"]
   assert second_row["daily_seq"] == first_row["daily_seq"] + 1
   assert "round 3 from #2" in second[1]
-  assert len(await dedup.get_signal_cluster(second_row["id"])) == 3
+  assert len(await store.get_signal_cluster(second_row["id"])) == 3
 
 
 def test_entry_setup_segment_parses_like_tag():
-  signal = telegram._parse_manual(
+  signal = wiring._parse_manual(
     "gold sell 4100-4105 / sl 4110 / tp 95/90/80 "
     "/ setup OB-Retest ***"
   )
@@ -127,7 +129,7 @@ def test_entry_setup_segment_parses_like_tag():
 
 
 def test_entry_scalp_option_sets_internal_setup():
-  signal = telegram._parse_manual(
+  signal = wiring._parse_manual(
     "gold sell 4100-4105 / sl 4110 / tp 95/90/80 / scalp"
   )
 
@@ -139,10 +141,10 @@ def test_entry_scalp_option_sets_internal_setup():
 def test_entry_scalp_nhanh_option_and_setup_override():
   base = "gold buy 4100-4105 / sl 4090 / tp 10/20"
 
-  assert telegram._parse_manual(
+  assert wiring._parse_manual(
     base + " / scalp nhanh / vip"
   )["setup_type"] == "scalp"
-  parsed = telegram._parse_manual(
+  parsed = wiring._parse_manual(
     base + " / scalp / setup breakout-retest **"
   )
   assert parsed["setup_type"] == "breakout-retest"
@@ -159,7 +161,7 @@ def test_entry_scalp_nhanh_option_and_setup_override():
   ],
 )
 def test_short_entry_endpoint_expands_near_anchor(zone, expected):
-  signal = telegram._parse_manual(
+  signal = wiring._parse_manual(
     f"gold sell {zone} / sl 4210 / tp 60"
   )
 
@@ -168,8 +170,8 @@ def test_short_entry_endpoint_expands_near_anchor(zone, expected):
 
 @pytest.mark.asyncio
 async def test_tag_command_updates_metadata(tmp_path, monkeypatch):
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
-  await dedup.init_db()
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", 42)
+  await store.init_db()
   rec = await _new_signal(1, setup_type=None, confluence=None)
   msg = SimpleNamespace(
     text=f"/trade_tag #{rec['daily_seq']} ob-retest ***",
@@ -177,28 +179,28 @@ async def test_tag_command_updates_metadata(tmp_path, monkeypatch):
     answer=AsyncMock(),
   )
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "post_result",
     AsyncMock(return_value="tagged"),
   )
 
-  await telegram.handle_trade_tag(msg)
+  await wiring.handle_trade_tag(msg)
 
-  row = await dedup.get_manual_signal(rec["id"])
+  row = await store.get_manual_signal(rec["id"])
   assert row["setup_type"] == "ob-retest"
   assert row["confluence"] == 3
 
 
 @pytest.mark.asyncio
 async def test_linked_accounting_stats_and_cluster_review(tmp_path, monkeypatch):
-  await dedup.init_db()
+  await store.init_db()
   source = await _new_signal(1)
-  await dedup.set_note(source["id"], "Retest held at the key level")
+  await store.set_note(source["id"], "Retest held at the key level")
 
-  await dedup.close_leg(source["id"], 50, 0.5)
-  await telegram._book_leg(source["id"], 90, None, -1001)
+  await store.close_leg(source["id"], 50, 0.5)
+  await wiring._book_leg(source["id"], 90, None, -1001)
 
-  round_two = await dedup.store_manual_signal(
+  round_two = await store.store_manual_signal(
     2,
     "BUY",
     4100.0,
@@ -209,10 +211,10 @@ async def test_linked_accounting_stats_and_cluster_review(tmp_path, monkeypatch)
     setup_type="ob-retest",
     confluence=3,
   )
-  await telegram._book_leg(round_two["id"], -30, None, -1001)
+  await wiring._book_leg(round_two["id"], -30, None, -1001)
 
-  records = await dedup.get_pips_records(0, 4_000_000_000)
-  signals = await dedup.get_all_signals()
+  records = await store.get_pips_records(0, 4_000_000_000)
+  signals = await store.get_all_signals()
   stats = build_stats(
     records,
     signals,
@@ -222,7 +224,7 @@ async def test_linked_accounting_stats_and_cluster_review(tmp_path, monkeypatch)
     13,
   )
   report = format_stats(stats, "all")
-  review = format_review(await dedup.get_signal_cluster(round_two["id"]))
+  review = format_review(await store.get_signal_cluster(round_two["id"]))
 
   assert [row["signal_id"] for row in records] == [
     source["id"],

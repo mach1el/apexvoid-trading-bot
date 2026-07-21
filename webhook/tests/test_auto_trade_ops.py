@@ -1,14 +1,15 @@
 import pytest
 
-from app import auto_trade_ops, redis_state
+from app.autotrade import delivery
+from app.persistence import redis_state
 
 
 def test_render_auto_trade_event_filters_noise_and_escapes_message():
-  assert auto_trade_ops.render_auto_trade_event({
+  assert delivery.render_auto_trade_event({
     "type": "rejected",
     "message": "ordinary candidate rejection",
   }) is None
-  text = auto_trade_ops.render_auto_trade_event({
+  text = delivery.render_auto_trade_event({
     "type": "opened",
     "message": "BUY <0.12> lots",
     "position_id": 91,
@@ -21,7 +22,7 @@ def test_render_auto_trade_event_filters_noise_and_escapes_message():
 
 
 def test_render_box_open_and_full_tp_as_shareable_cards():
-  opened = auto_trade_ops.render_auto_trade_event({
+  opened = delivery.render_auto_trade_event({
     "type": "opened",
     "message": (
       "Sell 0.04 lots filled 4,066.78, SL 4,070.63 · 39p structure · "
@@ -29,7 +30,7 @@ def test_render_box_open_and_full_tp_as_shareable_cards():
     ),
     "position_id": 39025496,
   })
-  take_profit = auto_trade_ops.render_auto_trade_event({
+  take_profit = delivery.render_auto_trade_event({
     "type": "take_profit",
     "message": "FULL TP +50 pips closed volume 400",
     "position_id": 39025496,
@@ -49,12 +50,12 @@ def test_render_box_open_and_full_tp_as_shareable_cards():
 
 
 def test_render_auto_trade_stop_and_warning_events():
-  stop = auto_trade_ops.render_auto_trade_event({
+  stop = delivery.render_auto_trade_event({
     "type": "stop_moved",
     "message": "🛡 Auto trade stop → 4,029.49 (BE+3) · position 39016393",
     "position_id": 39016393,
   })
-  warning = auto_trade_ops.render_auto_trade_event({
+  warning = delivery.render_auto_trade_event({
     "type": "warning",
     "message": "token grants live account 44669326 — re-authorize as demo only",
   })
@@ -69,15 +70,15 @@ def test_render_auto_trade_stop_and_warning_events():
 
 
 def test_render_scale_in_zone_and_group_events():
-  scale_in = auto_trade_ops.render_auto_trade_event({
+  scale_in = delivery.render_auto_trade_event({
     "type": "add",
     "message": "Tranche 2 · 0.08 lots · exposure-bound",
   })
-  zone = auto_trade_ops.render_auto_trade_event({
+  zone = delivery.render_auto_trade_event({
     "type": "zone_planned",
     "message": "two limits",
   })
-  result = auto_trade_ops.render_auto_trade_event({
+  result = delivery.render_auto_trade_event({
     "type": "group_result",
     "message": "realised $42 · no-add $31",
   })
@@ -101,9 +102,9 @@ async def test_group_stats_split_adds_and_deduplicate():
     "counterfactual_pips": 73,
   }
 
-  await auto_trade_ops._record_group_result(client, event)
-  await auto_trade_ops._record_group_result(client, event)
-  await auto_trade_ops._record_group_result(client, {
+  await delivery._record_group_result(client, event)
+  await delivery._record_group_result(client, event)
+  await delivery._record_group_result(client, {
     "type": "group_result",
     "group_id": "group-b",
     "had_adds": False,
@@ -123,16 +124,16 @@ async def test_group_stats_split_adds_and_deduplicate():
 
 @pytest.mark.asyncio
 async def test_pause_resume_and_status(monkeypatch):
-  monkeypatch.setattr(auto_trade_ops.settings, "auto_trade_enabled", True)
-  monkeypatch.setattr(auto_trade_ops.settings, "auto_trade_dry_run", False)
-  await auto_trade_ops.set_auto_trade_paused(True)
+  monkeypatch.setattr(delivery.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(delivery.settings, "auto_trade_dry_run", False)
+  await delivery.set_auto_trade_paused(True)
   client = redis_state.get_client()
   await client.set(
     "auto_trade:last_gate",
     '{"state":"waiting_rejection","box":{"low":4016.5,"high":4024.5},"full_tp_pips":70}',
   )
   assert await client.get("auto_trade:paused") == "1"
-  text = await auto_trade_ops.auto_trade_status_text()
+  text = await delivery.auto_trade_status_text()
   assert "demo trading" in text
   assert "paused" in text
   assert "Trades today: <b>0</b> · <b>unlimited</b>" in text
@@ -143,5 +144,5 @@ async def test_pause_resume_and_status(monkeypatch):
   assert "box 4,016.50–4,024.50" in text
   assert "full TP 70p" in text
   assert "auto trader" not in text.lower()
-  await auto_trade_ops.set_auto_trade_paused(False)
+  await delivery.set_auto_trade_paused(False)
   assert await client.get("auto_trade:paused") is None

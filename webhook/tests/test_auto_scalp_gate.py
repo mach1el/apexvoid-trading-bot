@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from app import auto_scalp_gate as gate
+from app.autotrade import gate
 
 
 def _frame(

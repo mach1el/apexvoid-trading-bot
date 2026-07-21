@@ -7,13 +7,15 @@ from unittest.mock import AsyncMock, Mock
 import pandas as pd
 import pytest
 
-from app.analysis import Regime
-from app import broadcast, dedup, redis_state, scanner
-from app.market_map import MapEntry, MarketMap, ScalpRail
-from app.ohlc_source import RedisOHLCSource
-from app.parsing import _parse_manual
-from app.scalp_ranges import ScalpBarrier, ScalpRange
-from app.structure import Zone
+from app.analysis.engine import Regime
+from app.signals import broadcast
+from app.persistence import store, redis_state
+from app.analysis import scanner
+from app.analysis.market_map import MapEntry, MarketMap, ScalpRail
+from app.analysis.ohlc_source import RedisOHLCSource
+from app.signals.parsing import _parse_manual
+from app.analysis.scalp_ranges import ScalpBarrier, ScalpRange
+from app.analysis.structure import Zone
 
 
 def _frame() -> pd.DataFrame:
@@ -120,7 +122,7 @@ async def test_scanner_dedups_same_setup_level_and_only_dms_owner(monkeypatch):
   broadcast_entry = AsyncMock()
   store_manual_signal = AsyncMock()
   monkeypatch.setattr(broadcast, "broadcast_entry", broadcast_entry)
-  monkeypatch.setattr(dedup, "store_manual_signal", store_manual_signal)
+  monkeypatch.setattr(store, "store_manual_signal", store_manual_signal)
   monkeypatch.setattr(scanner.settings, "scanner_symbols", "XAU")
   monkeypatch.setattr(scanner.settings, "scanner_exec_tf", "M5")
   monkeypatch.setattr(scanner.settings, "scanner_htf", "M30,M15")

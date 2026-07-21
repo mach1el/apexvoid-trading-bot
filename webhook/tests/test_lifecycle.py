@@ -10,7 +10,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import telegram
+from app.bot import wiring
 
 
 def _signal(
@@ -39,18 +39,18 @@ def _channel_message(text: str) -> SimpleNamespace:
 def test_owner_lock_fails_closed(monkeypatch):
   msg = SimpleNamespace(from_user=SimpleNamespace(id=42))
 
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", None)
-  assert telegram._is_owner(msg) is False
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", None)
+  assert wiring._is_owner(msg) is False
 
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
-  assert telegram._is_owner(msg) is True
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", 42)
+  assert wiring._is_owner(msg) is True
   msg.from_user.id = 99
-  assert telegram._is_owner(msg) is False
+  assert wiring._is_owner(msg) is False
 
 
 @pytest.mark.asyncio
 async def test_calculate_uses_local_log_and_correct_status(monkeypatch):
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", 42)
   summary = AsyncMock(return_value={
     "wins": 0,
     "win_pips": 0,
@@ -59,14 +59,14 @@ async def test_calculate_uses_local_log_and_correct_status(monkeypatch):
     "net": 0,
     "total": 0,
   })
-  monkeypatch.setattr(telegram, "get_pips_summary", summary)
+  monkeypatch.setattr(wiring, "get_pips_summary", summary)
   msg = SimpleNamespace(
     text="/trade_pips today",
     from_user=SimpleNamespace(id=42),
     answer=AsyncMock(),
   )
 
-  await telegram.handle_trade_pips(msg)
+  await wiring.handle_trade_pips(msg)
 
   assert msg.answer.await_args_list[0].args[0] == "📊 Calculating pips…"
   summary.assert_awaited_once()
@@ -79,27 +79,27 @@ async def test_resolve_sid_paths(monkeypatch):
     _signal(1, 2, "2026-07-02", 101),
     _signal(2, 2, today, 102),
   ]
-  monkeypatch.setattr(telegram, "_today_str", lambda: today)
+  monkeypatch.setattr(wiring, "_today_str", lambda: today)
   get_open = AsyncMock(return_value=opens)
   by_channel = AsyncMock(return_value={"id": 9})
-  monkeypatch.setattr(telegram, "get_open_signals", get_open)
+  monkeypatch.setattr(wiring, "get_open_signals", get_open)
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "get_signal_by_post",
     by_channel,
   )
 
-  assert await telegram._resolve_sid(2, None) == 2
-  assert await telegram._resolve_sid(None, 555) == 9
+  assert await wiring._resolve_sid(2, None) == 2
+  assert await wiring._resolve_sid(None, 555) == 9
 
   get_open.return_value = [_signal(4, 1, today, 104)]
-  assert await telegram._resolve_sid(None, None) == 4
+  assert await wiring._resolve_sid(None, None) == 4
 
   get_open.return_value = [
     _signal(4, 1, today, 104),
     _signal(5, 2, today, 105),
   ]
-  assert await telegram._resolve_sid(None, None) is None
+  assert await wiring._resolve_sid(None, None) is None
 
 
 @pytest.mark.asyncio
@@ -109,12 +109,12 @@ async def test_channel_close_unifies_accounting(monkeypatch):
   close = AsyncMock(return_value={"action": "close", "ok": True})
   post = AsyncMock(return_value="closed")
   delete = AsyncMock()
-  monkeypatch.setattr(telegram, "_resolve_sid", resolve)
-  monkeypatch.setattr(telegram, "do_close", close)
-  monkeypatch.setattr(telegram, "post_result", post)
-  monkeypatch.setattr(telegram, "_delete_command", delete)
+  monkeypatch.setattr(wiring, "_resolve_sid", resolve)
+  monkeypatch.setattr(wiring, "do_close", close)
+  monkeypatch.setattr(wiring, "post_result", post)
+  monkeypatch.setattr(wiring, "_delete_command", delete)
 
-  await telegram.handle_channel_close(msg)
+  await wiring.handle_channel_close(msg)
 
   ctx = close.await_args.args[0]
   assert ctx == {
@@ -136,15 +136,15 @@ async def test_channel_close_unifies_accounting(monkeypatch):
 async def test_partial_then_final_close_books_weighted_net_once(monkeypatch):
   partial_msg = _channel_message("close #3 +50 50%")
   final_msg = _channel_message("close #3 +90")
-  monkeypatch.setattr(telegram, "_resolve_sid", AsyncMock(return_value=23))
+  monkeypatch.setattr(wiring, "_resolve_sid", AsyncMock(return_value=23))
   close = AsyncMock(return_value={"action": "close", "ok": True})
   post = AsyncMock(return_value="ok")
-  monkeypatch.setattr(telegram, "do_close", close)
-  monkeypatch.setattr(telegram, "post_result", post)
-  monkeypatch.setattr(telegram, "_delete_command", AsyncMock())
+  monkeypatch.setattr(wiring, "do_close", close)
+  monkeypatch.setattr(wiring, "post_result", post)
+  monkeypatch.setattr(wiring, "_delete_command", AsyncMock())
 
-  await telegram.handle_channel_close(partial_msg)
-  await telegram.handle_channel_close(final_msg)
+  await wiring.handle_channel_close(partial_msg)
+  await wiring.handle_channel_close(final_msg)
 
   assert close.await_args_list[0].args[0]["frac"] == 0.5
   assert close.await_args_list[0].args[0]["pips"] == 50
@@ -156,44 +156,44 @@ async def test_partial_then_final_close_books_weighted_net_once(monkeypatch):
 @pytest.mark.asyncio
 async def test_overbook_is_rejected_without_accounting(monkeypatch):
   msg = _channel_message("close #3 +40 60%")
-  monkeypatch.setattr(telegram, "_resolve_sid", AsyncMock(return_value=23))
+  monkeypatch.setattr(wiring, "_resolve_sid", AsyncMock(return_value=23))
   close = AsyncMock(return_value={"action": "close", "ok": True})
   post = AsyncMock(return_value="overbook")
-  monkeypatch.setattr(telegram, "do_close", close)
-  monkeypatch.setattr(telegram, "post_result", post)
-  monkeypatch.setattr(telegram, "_delete_command", AsyncMock())
+  monkeypatch.setattr(wiring, "do_close", close)
+  monkeypatch.setattr(wiring, "post_result", post)
+  monkeypatch.setattr(wiring, "_delete_command", AsyncMock())
 
-  await telegram.handle_channel_close(msg)
+  await wiring.handle_channel_close(msg)
 
   assert close.await_args.args[0]["frac"] == 0.6
   post.assert_awaited_once()
 
 
 def test_close_be_parses_as_full_remaining():
-  assert telegram._parse_close("close #3 be") == (3, 0, None)
+  assert wiring._parse_close("close #3 be") == (3, 0, None)
 
 
 def test_fallback_router_is_included_last():
-  assert telegram.dp.sub_routers[-1].name == "fallback"
+  assert wiring.dp.sub_routers[-1].name == "fallback"
 
 
 @pytest.mark.asyncio
 async def test_channel_active_deduplicates(monkeypatch):
   msg = _channel_message("active #1")
   row = _signal(11, 1, "2026-07-03", 701)
-  monkeypatch.setattr(telegram, "_resolve_sid", AsyncMock(return_value=11))
+  monkeypatch.setattr(wiring, "_resolve_sid", AsyncMock(return_value=11))
   active = AsyncMock(side_effect=[
     {"action": "active", "ok": True, "row": row},
     {"action": "active", "ok": False},
   ])
   post = AsyncMock(return_value="active")
   delete = AsyncMock()
-  monkeypatch.setattr(telegram, "do_active", active)
-  monkeypatch.setattr(telegram, "post_result", post)
-  monkeypatch.setattr(telegram, "_delete_command", delete)
+  monkeypatch.setattr(wiring, "do_active", active)
+  monkeypatch.setattr(wiring, "post_result", post)
+  monkeypatch.setattr(wiring, "_delete_command", delete)
 
-  await telegram.handle_channel_active(msg)
-  await telegram.handle_channel_active(msg)
+  await wiring.handle_channel_active(msg)
+  await wiring.handle_channel_active(msg)
 
   assert active.await_count == 2
   post.assert_awaited_once()
@@ -204,7 +204,7 @@ async def test_channel_active_deduplicates(monkeypatch):
 async def test_handler_order_and_bare_pips_default_off(monkeypatch):
   dm_callbacks = [
     handler.callback.__name__
-    for handler in telegram.dp.observers["message"].handlers
+    for handler in wiring.dp.observers["message"].handlers
   ]
   for name in (
     "handle_trade_reopen",
@@ -221,7 +221,7 @@ async def test_handler_order_and_bare_pips_default_off(monkeypatch):
 
   callbacks = [
     handler.callback.__name__
-    for handler in telegram.dp.observers["channel_post"].handlers
+    for handler in wiring.dp.observers["channel_post"].handlers
   ]
   ordered = [
     "handle_channel_active",
@@ -239,15 +239,15 @@ async def test_handler_order_and_bare_pips_default_off(monkeypatch):
   )
 
   handle_pips = AsyncMock()
-  monkeypatch.setattr(telegram, "_handle_pips", handle_pips)
+  monkeypatch.setattr(wiring, "_handle_pips", handle_pips)
   msg = SimpleNamespace(text="still +40 pips to go")
 
-  monkeypatch.setattr(telegram.settings, "auto_book_bare_pips", False)
-  await telegram.handle_profit_text(msg)
+  monkeypatch.setattr(wiring.settings, "auto_book_bare_pips", False)
+  await wiring.handle_profit_text(msg)
   handle_pips.assert_not_awaited()
 
-  monkeypatch.setattr(telegram.settings, "auto_book_bare_pips", True)
-  await telegram.handle_profit_text(msg)
+  monkeypatch.setattr(wiring.settings, "auto_book_bare_pips", True)
+  await wiring.handle_profit_text(msg)
   handle_pips.assert_awaited_once_with(
     msg,
     "still +40 pips to go",
@@ -262,7 +262,7 @@ async def test_move_sl_to_breakeven_resets_alert(monkeypatch):
     "entry": 2000.0,
     "entry_end": 2004.0,
   }
-  from app import trade_ops
+  from app.signals import trade_ops
   monkeypatch.setattr(
     trade_ops,
     "get_open_signals",
@@ -271,7 +271,7 @@ async def test_move_sl_to_breakeven_resets_alert(monkeypatch):
   update = AsyncMock(return_value=signal)
   monkeypatch.setattr(trade_ops, "update_sl", update)
 
-  from app import redis_state
+  from app.persistence import redis_state
   await redis_state.set_sl_flag(31)
   moved = await trade_ops.do_sl({
     "sid": 31,

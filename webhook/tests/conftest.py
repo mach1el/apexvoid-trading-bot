@@ -23,9 +23,9 @@ os.environ.setdefault(
   "postgresql://apexvoid:apexvoid@localhost:55432/signals",
 )
 
-from app import dedup  # noqa: E402  (import after env is seeded)
-from app import redis_state  # noqa: E402
-from app import market_map_delivery  # noqa: E402
+from app.persistence import store  # noqa: E402  (import after env is seeded)
+from app.persistence import redis_state  # noqa: E402
+from app.analysis import market_map_delivery  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -54,8 +54,8 @@ def _fake_redis(monkeypatch):
 def _reset_db(event_loop):
   """Drop and recreate the schema before each test; drop the pool after."""
   async def _wipe():
-    await dedup.close_pool()
-    conn = await asyncpg.connect(dedup.settings.database_url)
+    await store.close_pool()
+    conn = await asyncpg.connect(store.settings.database_url)
     try:
       await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
     finally:
@@ -63,26 +63,26 @@ def _reset_db(event_loop):
 
   event_loop.run_until_complete(_wipe())
   yield
-  event_loop.run_until_complete(dedup.close_pool())
+  event_loop.run_until_complete(store.close_pool())
 
 
 class _Sql:
   """Minimal async helper for tests that need to poke the DB directly."""
 
   async def exec(self, query, *args):
-    async with dedup._connect() as db:
+    async with store._connect() as db:
       return await db.execute(query, *args)
 
   async def val(self, query, *args):
-    async with dedup._connect() as db:
+    async with store._connect() as db:
       return await db.fetchval(query, *args)
 
   async def row(self, query, *args):
-    async with dedup._connect() as db:
+    async with store._connect() as db:
       return await db.fetchrow(query, *args)
 
   async def fetch(self, query, *args):
-    async with dedup._connect() as db:
+    async with store._connect() as db:
       return await db.fetch(query, *args)
 
 

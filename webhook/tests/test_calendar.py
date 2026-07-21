@@ -14,7 +14,9 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import calendar, dedup, telegram
+from app.signals import calendar
+from app.persistence import store
+from app.bot import wiring
 
 
 @pytest.fixture
@@ -52,9 +54,9 @@ async def test_event_id_upsert_updates_actual_without_duplicate(
   sql,
   feed,
 ):
-  await dedup.init_db()
+  await store.init_db()
   first = calendar._filter_events(calendar._parse_feed(feed, synced_at=1))
-  await dedup.upsert_events(first)
+  await store.upsert_events(first)
 
   updated_feed = json.loads(json.dumps(feed))
   updated_feed[0]["actual"] = "210K"
@@ -62,7 +64,7 @@ async def test_event_id_upsert_updates_actual_without_duplicate(
     calendar._parse_feed(updated_feed, synced_at=2)
   )
   assert first[0]["event_id"] == second[0]["event_id"]
-  await dedup.upsert_events(second)
+  await store.upsert_events(second)
 
   count = await sql.val("SELECT COUNT(*) FROM events")
   actual = await sql.val(
@@ -74,7 +76,7 @@ async def test_event_id_upsert_updates_actual_without_duplicate(
 
 @pytest.mark.asyncio
 async def test_event_window_uses_local_database_only():
-  await dedup.init_db()
+  await store.init_db()
   now = 1_800_000_000
   base = {
     "currency": "USD",
@@ -86,7 +88,7 @@ async def test_event_window_uses_local_database_only():
     "source": "ff",
     "synced_at": now,
   }
-  await dedup.upsert_events([
+  await store.upsert_events([
     {
       **base,
       "event_id": "soon",
@@ -101,8 +103,8 @@ async def test_event_window_uses_local_database_only():
     },
   ])
 
-  assert (await dedup.event_in_window(now, 4 * 3600))["title"] == "CPI m/m"
-  assert await dedup.event_in_window(now + 10_000, 60) is None
+  assert (await store.event_in_window(now, 4 * 3600))["title"] == "CPI m/m"
+  assert await store.event_in_window(now + 10_000, 60) is None
 
 
 class _DeniedResponse:
@@ -220,9 +222,9 @@ def _private_message():
 @pytest.mark.asyncio
 async def test_guard_tags_entry_and_no_event_does_not(monkeypatch):
   now = 1_800_000_000
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
-  monkeypatch.setattr(telegram.settings, "news_guard_block", False)
-  monkeypatch.setattr(telegram.time, "time", lambda: now)
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", 42)
+  monkeypatch.setattr(wiring.settings, "news_guard_block", False)
+  monkeypatch.setattr(wiring.time, "time", lambda: now)
   guard = AsyncMock(return_value={
     "title": "CPI m/m",
     "ts_utc": now + 7200,
@@ -240,43 +242,43 @@ async def test_guard_tags_entry_and_no_event_does_not(monkeypatch):
     "visibility": "both",
   }
   broadcast = AsyncMock()
-  monkeypatch.setattr(telegram, "event_in_window", guard)
-  monkeypatch.setattr(telegram, "store_manual_signal", store)
+  monkeypatch.setattr(wiring, "event_in_window", guard)
+  monkeypatch.setattr(wiring, "store_manual_signal", store)
   monkeypatch.setattr(
-    telegram,
+    wiring,
     "get_manual_signal",
     AsyncMock(return_value=signal),
   )
-  monkeypatch.setattr(telegram, "broadcast_entry", broadcast)
+  monkeypatch.setattr(wiring, "broadcast_entry", broadcast)
 
-  await telegram.handle_private_signal(_private_message())
+  await wiring.handle_private_signal(_private_message())
   assert "⚠️ CPI m/m in 2h 0m — expect volatility" in (
     broadcast.await_args.args[0]["guard_text"]
   )
 
   guard.return_value = None
   broadcast.reset_mock()
-  await telegram.handle_private_signal(_private_message())
+  await wiring.handle_private_signal(_private_message())
   assert broadcast.await_args.args[0]["guard_text"] is None
 
 
 @pytest.mark.asyncio
 async def test_guard_block_refuses_post(monkeypatch):
   now = 1_800_000_000
-  monkeypatch.setattr(telegram.settings, "telegram_owner_id", 42)
-  monkeypatch.setattr(telegram.settings, "news_guard_block", True)
-  monkeypatch.setattr(telegram.time, "time", lambda: now)
-  monkeypatch.setattr(telegram, "event_in_window", AsyncMock(return_value={
+  monkeypatch.setattr(wiring.settings, "telegram_owner_id", 42)
+  monkeypatch.setattr(wiring.settings, "news_guard_block", True)
+  monkeypatch.setattr(wiring.time, "time", lambda: now)
+  monkeypatch.setattr(wiring, "event_in_window", AsyncMock(return_value={
     "title": "CPI m/m",
     "ts_utc": now + 7200,
   }))
   store = AsyncMock()
   broadcast = AsyncMock()
-  monkeypatch.setattr(telegram, "store_manual_signal", store)
-  monkeypatch.setattr(telegram, "broadcast_entry", broadcast)
+  monkeypatch.setattr(wiring, "store_manual_signal", store)
+  monkeypatch.setattr(wiring, "broadcast_entry", broadcast)
   msg = _private_message()
 
-  await telegram.handle_private_signal(msg)
+  await wiring.handle_private_signal(msg)
 
   store.assert_not_awaited()
   broadcast.assert_not_awaited()
@@ -299,7 +301,7 @@ async def test_same_day_restart_skips_fetch_and_digest(
     "_CACHE_NEXTWEEK",
     tmp_path / "nextweek.json",
   )
-  await dedup.init_db()
+  await store.init_db()
   fetch = AsyncMock(return_value=feed)
   send = AsyncMock()
   monkeypatch.setattr(calendar, "_fetch_feed", fetch)
@@ -322,5 +324,5 @@ async def test_same_day_restart_skips_fetch_and_digest(
     -1001,
     -1002,
   ]
-  assert await dedup.get_meta("last_sync_date") == "2026-07-03"
-  assert await dedup.get_meta("last_brief_date") == "2026-07-03"
+  assert await store.get_meta("last_sync_date") == "2026-07-03"
+  assert await store.get_meta("last_brief_date") == "2026-07-03"

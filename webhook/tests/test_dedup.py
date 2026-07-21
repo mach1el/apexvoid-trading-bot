@@ -2,17 +2,17 @@ import json
 
 import pytest
 
-from app import dedup
+from app.persistence import store
 
 
 @pytest.mark.asyncio
 async def test_daily_seq_resets_by_trade_date(sql):
-  await dedup.init_db()
+  await store.init_db()
 
-  first = await dedup.store_manual_signal(
+  first = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
-  second = await dedup.store_manual_signal(
+  second = await store.store_manual_signal(
     2, "SELL", 2000.0, 2002.0, 2010.0, [1990.0],
   )
   assert first["daily_seq"] == 1
@@ -20,7 +20,7 @@ async def test_daily_seq_resets_by_trade_date(sql):
 
   await sql.exec("UPDATE manual_signals SET trade_date = '2000-01-01'")
 
-  next_day = await dedup.store_manual_signal(
+  next_day = await store.store_manual_signal(
     3, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
   assert next_day["daily_seq"] == 1
@@ -28,8 +28,8 @@ async def test_daily_seq_resets_by_trade_date(sql):
 
 @pytest.mark.asyncio
 async def test_schema_has_all_columns_and_fill_is_idempotent(sql):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
 
@@ -46,47 +46,47 @@ async def test_schema_has_all_columns_and_fill_is_idempotent(sql):
     "visibility",
   } <= columns
 
-  assert await dedup.mark_filled(rec["id"]) is not None
-  assert await dedup.mark_filled(rec["id"]) is None
+  assert await store.mark_filled(rec["id"]) is not None
+  assert await store.mark_filled(rec["id"]) is None
 
 
 @pytest.mark.asyncio
 async def test_get_open_signals_auto_cancels_stale_pending(sql):
-  await dedup.init_db()
-  stale = await dedup.store_manual_signal(
+  await store.init_db()
+  stale = await store.store_manual_signal(
     1, "SELL", 4092.0, 4095.0, 4100.0, [4080.0],
   )
-  today = await dedup.store_manual_signal(
+  today = await store.store_manual_signal(
     2, "SELL", 4088.0, 4090.0, 4095.0, [4075.0],
   )
-  filled = await dedup.store_manual_signal(
+  filled = await store.store_manual_signal(
     3, "SELL", 4018.0, 4022.0, 4028.0, [4010.0],
   )
-  assert await dedup.mark_filled(filled["id"]) is not None
+  assert await store.mark_filled(filled["id"]) is not None
   await sql.exec(
     "UPDATE manual_signals SET trade_date = '2000-01-01' "
     "WHERE id = ANY($1::bigint[])",
     [stale["id"], filled["id"]],
   )
 
-  opens = await dedup.get_open_signals()
+  opens = await store.get_open_signals()
 
   assert [row["id"] for row in opens] == [today["id"], filled["id"]]
-  stale_row = await dedup.get_manual_signal(stale["id"])
+  stale_row = await store.get_manual_signal(stale["id"])
   assert stale_row["status"] == "cancelled"
   assert stale_row["fill_state"] == "pending"
   assert stale_row["closed_at"] is not None
-  today_row = await dedup.get_manual_signal(today["id"])
+  today_row = await store.get_manual_signal(today["id"])
   assert today_row["status"] == "open"
-  filled_row = await dedup.get_manual_signal(filled["id"])
+  filled_row = await store.get_manual_signal(filled["id"])
   assert filled_row["status"] == "open"
   assert filled_row["fill_state"] == "filled"
 
 
 @pytest.mark.asyncio
 async def test_mark_filled_auto_cancels_stale_pending(sql):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "SELL", 4092.0, 4095.0, 4100.0, [4080.0],
   )
   await sql.exec(
@@ -94,9 +94,9 @@ async def test_mark_filled_auto_cancels_stale_pending(sql):
     rec["id"],
   )
 
-  assert await dedup.mark_filled(rec["id"]) is None
+  assert await store.mark_filled(rec["id"]) is None
 
-  row = await dedup.get_manual_signal(rec["id"])
+  row = await store.get_manual_signal(rec["id"])
   assert row["status"] == "cancelled"
   assert row["fill_state"] == "pending"
   assert row["closed_at"] is not None
@@ -108,16 +108,16 @@ async def test_mark_filled_auto_cancels_stale_pending(sql):
   [(90, 70), (-30, 10)],
 )
 async def test_close_leg_weighted_net(sql, runner_pips, expected_net):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
 
-  partial = await dedup.close_leg(rec["id"], 50, 0.5)
+  partial = await store.close_leg(rec["id"], 50, 0.5)
   assert partial["closed"] is False
   assert partial["remaining"] == pytest.approx(0.5)
 
-  final = await dedup.close_leg(rec["id"], runner_pips)
+  final = await store.close_leg(rec["id"], runner_pips)
   assert final["closed"] is True
   assert final["net"] == expected_net
 
@@ -132,13 +132,13 @@ async def test_close_leg_weighted_net(sql, runner_pips, expected_net):
 
 @pytest.mark.asyncio
 async def test_partial_profit_then_breakeven_stop_preserves_profit():
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "SELL", 4026.0, 4029.0, 4034.0, [4023.0, 4017.0],
   )
 
-  partial = await dedup.close_leg(rec["id"], 90, 0.5)
-  final = await dedup.close_leg(rec["id"], 0)
+  partial = await store.close_leg(rec["id"], 90, 0.5)
+  final = await store.close_leg(rec["id"], 0)
 
   assert partial["remaining"] == pytest.approx(0.5)
   assert final["closed"] is True
@@ -147,37 +147,37 @@ async def test_partial_profit_then_breakeven_stop_preserves_profit():
 
 @pytest.mark.asyncio
 async def test_close_leg_rejects_overbook():
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
 
-  await dedup.close_leg(rec["id"], 50, 0.5)
-  rejected = await dedup.close_leg(rec["id"], 40, 0.6)
+  await store.close_leg(rec["id"], 50, 0.5)
+  rejected = await store.close_leg(rec["id"], 40, 0.6)
 
   assert rejected["error"] == "exceeds_remaining"
   assert rejected["remaining"] == pytest.approx(0.5)
-  open_signal = (await dedup.get_open_signals())[0]
+  open_signal = (await store.get_open_signals())[0]
   assert len(open_signal["legs"]) == 1
 
 
 @pytest.mark.asyncio
 async def test_undo_last_close_leg_restores_running_signal(sql):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
 
-  await dedup.close_leg(rec["id"], 50, 0.5)
-  final = await dedup.close_leg(rec["id"], 90)
-  await dedup.store_pips("+", final["net"], signal_id=rec["id"])
+  await store.close_leg(rec["id"], 50, 0.5)
+  final = await store.close_leg(rec["id"], 90)
+  await store.store_pips("+", final["net"], signal_id=rec["id"])
 
-  restored = await dedup.undo_last_close_leg(rec["id"])
+  restored = await store.undo_last_close_leg(rec["id"])
 
   assert restored["status"] == "open"
   assert restored["remaining"] == pytest.approx(0.5)
   assert restored["restored_leg"]["pips"] == 90
-  row = await dedup.get_manual_signal(rec["id"])
+  row = await store.get_manual_signal(rec["id"])
   assert row["status"] == "open"
   assert row["result_pips"] is None
   assert row["closed_at"] is None
@@ -192,8 +192,8 @@ async def test_undo_last_close_leg_restores_running_signal(sql):
 
 @pytest.mark.asyncio
 async def test_undo_legacy_close_without_legs(sql):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
 
@@ -204,11 +204,11 @@ async def test_undo_legacy_close_without_legs(sql):
     rec["id"],
   )
 
-  restored = await dedup.undo_last_close_leg(rec["id"])
+  restored = await store.undo_last_close_leg(rec["id"])
 
   assert restored["status"] == "open"
   assert restored["remaining"] == pytest.approx(1.0)
-  row = await dedup.get_manual_signal(rec["id"])
+  row = await store.get_manual_signal(rec["id"])
   assert row["status"] == "open"
   assert row["result_pips"] is None
   assert row["closed_at"] is None
@@ -217,14 +217,14 @@ async def test_undo_legacy_close_without_legs(sql):
 
 @pytest.mark.asyncio
 async def test_delete_manual_signal_purges_row_posts_and_pips(sql):
-  await dedup.init_db()
-  rec = await dedup.store_manual_signal(
+  await store.init_db()
+  rec = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
-  await dedup.insert_signal_post(rec["id"], -100123456789, 555, "vip")
-  await dedup.store_pips("+", 30, signal_id=rec["id"])
+  await store.insert_signal_post(rec["id"], -100123456789, 555, "vip")
+  await store.store_pips("+", 30, signal_id=rec["id"])
 
-  deleted = await dedup.delete_manual_signal(rec["id"])
+  deleted = await store.delete_manual_signal(rec["id"])
 
   assert deleted["id"] == rec["id"]
   assert deleted["posts"] == [
@@ -235,8 +235,8 @@ async def test_delete_manual_signal_purges_row_posts_and_pips(sql):
       "tier": "vip",
     }
   ]
-  assert await dedup.get_manual_signal(rec["id"]) is None
-  assert await dedup.get_signal_posts(rec["id"]) == []
+  assert await store.get_manual_signal(rec["id"]) is None
+  assert await store.get_signal_posts(rec["id"]) == []
   assert await sql.val(
     "SELECT COUNT(*) FROM pips_log WHERE signal_id = $1", rec["id"],
   ) == 0
@@ -244,21 +244,21 @@ async def test_delete_manual_signal_purges_row_posts_and_pips(sql):
 
 @pytest.mark.asyncio
 async def test_delete_manual_signal_refuses_when_rounds_exist(sql):
-  await dedup.init_db()
-  root = await dedup.store_manual_signal(
+  await store.init_db()
+  root = await store.store_manual_signal(
     1, "BUY", 2000.0, 2002.0, 1990.0, [2010.0],
   )
-  await dedup.store_manual_signal(
+  await store.store_manual_signal(
     2, "BUY", 2001.0, 2003.0, 1991.0, [2011.0], parent_id=root["id"],
   )
 
-  result = await dedup.delete_manual_signal(root["id"])
+  result = await store.delete_manual_signal(root["id"])
 
   assert result == {"error": "has_rounds"}
-  assert await dedup.get_manual_signal(root["id"]) is not None
+  assert await store.get_manual_signal(root["id"]) is not None
 
 
 @pytest.mark.asyncio
 async def test_delete_manual_signal_missing_returns_none():
-  await dedup.init_db()
-  assert await dedup.delete_manual_signal(9999) is None
+  await store.init_db()
+  assert await store.delete_manual_signal(9999) is None

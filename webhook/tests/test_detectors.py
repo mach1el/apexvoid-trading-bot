@@ -4,13 +4,13 @@ from typing import Callable
 import pandas as pd
 import pytest
 
-from app.analysis import Regime
-from app import detectors
-from app.pa_types import Break, DealingRange, Grab, Pool, SessionLevel
-from app.regime import BoxBreak
-from app.scalp_ranges import ScalpBarrier, ScalpRange
-from app.structure import Level, Swing, Zone
-from app.trendlines import Trendline
+from app.analysis.engine import Regime
+from app.analysis import detectors
+from app.analysis.types import Break, DealingRange, Grab, Pool, SessionLevel
+from app.analysis.regime import BoxBreak
+from app.analysis.scalp_ranges import ScalpBarrier, ScalpRange
+from app.analysis.structure import Level, Swing, Zone
+from app.analysis.trendlines import Trendline
 
 
 def _df(rows: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:

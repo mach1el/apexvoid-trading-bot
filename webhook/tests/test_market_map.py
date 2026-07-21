@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from app.market_map import (
+from app.analysis.market_map import (
   MapEntry,
   MarketMap,
   ScalpRail,
@@ -17,10 +17,10 @@ from app.market_map import (
   market_map_payload,
   render_market_map,
 )
-from app.pa_types import DealingRange, Level, SessionLevel, Zone
-from app.regime import BoxBreak
-from app.scalp_ranges import ScalpBarrier, ScalpRange
-from app.trendlines import Trendline
+from app.analysis.types import DealingRange, Level, SessionLevel, Zone
+from app.analysis.regime import BoxBreak
+from app.analysis.scalp_ranges import ScalpBarrier, ScalpRange
+from app.analysis.trendlines import Trendline
 
 
 def _cfg(**overrides):

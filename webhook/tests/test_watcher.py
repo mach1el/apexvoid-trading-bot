@@ -11,9 +11,10 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import broadcast, redis_state, watcher
-from app.pips_format import pips_between, rr_entry, sl_result_pips
-from app.symbols import pip_for
+from app.signals import broadcast, watcher
+from app.persistence import redis_state
+from app.signals.pips_format import pips_between, rr_entry, sl_result_pips
+from app.core.symbols import pip_for
 
 
 def _bar(ts: str, o: float, h: float, l: float, c: float) -> dict:

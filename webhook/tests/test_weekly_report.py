@@ -12,8 +12,9 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import symbols, weekly_report
-from app.reports import build_stats, format_stats
+from app.core import symbols
+from app.signals import weekly_report
+from app.signals.reports import build_stats, format_stats
 
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")

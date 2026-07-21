@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from app import auto_scale_context as context
-from app.auto_scalp_gate import AutoScalpDecision, AutoScalpRail
-from app.pa_types import Break, Leg, Swing
+from app.autotrade import scale_context as context
+from app.autotrade.gate import AutoScalpDecision, AutoScalpRail
+from app.analysis.types import Break, Leg, Swing
 
 
 def test_builds_closed_bar_structure_context_from_shared_primitives(monkeypatch):

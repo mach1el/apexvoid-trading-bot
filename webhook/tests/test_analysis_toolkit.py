@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from app.analysis import (
+from app.analysis.engine import (
   AnalysisSettings,
   Regime,
   TimeframeAnalysis,
@@ -10,15 +10,15 @@ from app.analysis import (
   analyze,
   regime,
 )
-from app.dealing_range import dealing_range
-from app.levels import key_levels
-from app.liquidity import liquidity_grabs, liquidity_pools
-from app.momentum import momentum
-from app.pa_types import Break, DealingRange, Leg, Level, Pool, SessionLevel, Swing, Zone
-from app.session_liquidity import previous_week_levels, session_levels
-from app.structure import market_structure, structure_breaks
-from app.swings import find_swings
-from app.zones import (
+from app.analysis.dealing_range import dealing_range
+from app.analysis.levels import key_levels
+from app.analysis.liquidity import liquidity_grabs, liquidity_pools
+from app.analysis.momentum import momentum
+from app.analysis.types import Break, DealingRange, Leg, Level, Pool, SessionLevel, Swing, Zone
+from app.analysis.session_liquidity import previous_week_levels, session_levels
+from app.analysis.structure import market_structure, structure_breaks
+from app.analysis.swings import find_swings
+from app.analysis.zones import (
   breaker_blocks,
   mark_mitigation,
   merge_zones,
@@ -597,21 +597,21 @@ def test_analyze_assembles_per_tf_outputs_and_htf_bias():
 
 
 def test_analysis_modules_have_no_delivery_or_state_imports():
-  import app.analysis as analysis
-  import app.dealing_range as dealing_range_module
-  import app.levels as levels
-  import app.liquidity as liquidity
-  import app.momentum as momentum_module
-  import app.market_map as market_map
-  import app.pa_math as pa_math
-  import app.pa_types as pa_types
-  import app.regime as regime_module
-  import app.scalp_ranges as scalp_ranges_module
-  import app.session_liquidity as session_liquidity
-  import app.structure as structure
-  import app.swings as swings_module
-  import app.trendlines as trendlines_module
-  import app.zones as zones
+  import app.analysis.engine as engine
+  import app.analysis.dealing_range as dealing_range_module
+  import app.analysis.levels as levels
+  import app.analysis.liquidity as liquidity
+  import app.analysis.momentum as momentum_module
+  import app.analysis.market_map as market_map
+  import app.analysis.math_utils as math_utils
+  import app.analysis.types as types
+  import app.analysis.regime as regime_module
+  import app.analysis.scalp_ranges as scalp_ranges_module
+  import app.analysis.session_liquidity as session_liquidity
+  import app.analysis.structure as structure
+  import app.analysis.swings as swings_module
+  import app.analysis.trendlines as trendlines_module
+  import app.analysis.zones as zones
 
   forbidden = {
     "redis_state",
@@ -620,14 +620,14 @@ def test_analysis_modules_have_no_delivery_or_state_imports():
     "store_manual_signal",
   }
   modules = [
-    analysis,
+    engine,
     dealing_range_module,
     levels,
     liquidity,
     momentum_module,
     market_map,
-    pa_math,
-    pa_types,
+    math_utils,
+    types,
     regime_module,
     scalp_ranges_module,
     session_liquidity,

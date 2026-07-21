@@ -10,8 +10,11 @@ os.environ.setdefault(
 )
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-100123456789")
 
-from app import broadcast, dedup, symbols, telegram, trade_ops
-from app.pips_format import wing_icons
+from app.signals import broadcast, trade_ops
+from app.persistence import store
+from app.core import symbols
+from app.bot import wiring
+from app.signals.pips_format import wing_icons
 
 
 VIP_ID = -100123456789
@@ -29,8 +32,8 @@ def dual_channels(monkeypatch):
 
 
 async def _signal(tmp_path, monkeypatch, visibility="both"):
-  await dedup.init_db()
-  record = await dedup.store_manual_signal(
+  await store.init_db()
+  record = await store.store_manual_signal(
     1,
     "BUY",
     2000.0,
@@ -40,7 +43,7 @@ async def _signal(tmp_path, monkeypatch, visibility="both"):
     symbol="XAU",
     visibility=visibility,
   )
-  return await dedup.get_manual_signal(record["id"])
+  return await store.get_manual_signal(record["id"])
 
 
 def test_channels_and_targets(dual_channels):
@@ -73,12 +76,12 @@ async def test_broadcast_entry_persists_delivery_targets(
 
   await broadcast.broadcast_entry(signal)
 
-  posts = await dedup.get_signal_posts(signal["id"])
+  posts = await store.get_signal_posts(signal["id"])
   assert len(posts) == count
   assert [post["tier"] for post in posts] == (
     ["vip", "public"] if visibility == "both" else ["vip"]
   )
-  refreshed = await dedup.get_manual_signal(signal["id"])
+  refreshed = await store.get_manual_signal(signal["id"])
   assert refreshed["channel_message_id"] == 101
 
 
@@ -271,7 +274,7 @@ async def test_manual_tp_is_notify_only_and_tier_aware(monkeypatch):
 @pytest.mark.asyncio
 async def test_public_channel_command_is_ignored(monkeypatch, dual_channels):
   execute = AsyncMock()
-  monkeypatch.setattr(telegram, "do_close", execute)
+  monkeypatch.setattr(wiring, "do_close", execute)
   msg = SimpleNamespace(
     text="close #3 +80",
     message_id=900,
@@ -279,7 +282,7 @@ async def test_public_channel_command_is_ignored(monkeypatch, dual_channels):
     reply_to_message=SimpleNamespace(message_id=700),
   )
 
-  await telegram.handle_channel_close(msg)
+  await wiring.handle_channel_close(msg)
 
   execute.assert_not_awaited()
 
@@ -291,9 +294,9 @@ async def test_vip_reply_resolves_through_signal_posts(
   dual_channels,
 ):
   signal = await _signal(tmp_path, monkeypatch)
-  await dedup.insert_signal_post(signal["id"], VIP_ID, 555, "vip")
+  await store.insert_signal_post(signal["id"], VIP_ID, 555, "vip")
 
-  assert await telegram._resolve_sid(None, 555, "XAU") == signal["id"]
+  assert await wiring._resolve_sid(None, 555, "XAU") == signal["id"]
 
 
 @pytest.mark.asyncio
@@ -309,9 +312,9 @@ async def test_existing_single_post_is_backfilled(
     signal["id"],
   )
 
-  await dedup.init_db()
+  await store.init_db()
 
-  assert await dedup.get_signal_posts(signal["id"]) == [{
+  assert await store.get_signal_posts(signal["id"]) == [{
     "signal_id": signal["id"],
     "channel_id": VIP_ID,
     "message_id": 777,
@@ -326,7 +329,7 @@ async def test_reopen_inherits_vip_visibility(
   dual_channels,
 ):
   source = await _signal(tmp_path, monkeypatch, "vip")
-  await dedup.close_leg(source["id"], 50)  # re-entry only applies once closed
+  await store.close_leg(source["id"], 50)  # re-entry only applies once closed
 
   result = await trade_ops.do_reopen({
     "sid": source["id"],
@@ -334,20 +337,20 @@ async def test_reopen_inherits_vip_visibility(
     "entry_override": None,
   })
 
-  reopened = await dedup.get_manual_signal(result["record"]["id"])
+  reopened = await store.get_manual_signal(result["record"]["id"])
   assert reopened["visibility"] == "vip"
 
 
 def test_entry_vip_flag_is_standalone_and_defaults_both():
   base = "gold sell 4100-4105 / sl 4110 / tp 95/90/80"
 
-  assert telegram._parse_manual(base)["visibility"] == "both"
-  assert telegram._parse_manual(base + " / vip")["visibility"] == "vip"
-  parsed = telegram._parse_manual(
+  assert wiring._parse_manual(base)["visibility"] == "both"
+  assert wiring._parse_manual(base + " / vip")["visibility"] == "vip"
+  parsed = wiring._parse_manual(
     base + " / vip / setup ob-retest ***"
   )
   assert parsed["visibility"] == "vip"
   assert parsed["setup_type"] == "ob-retest"
-  scalp = telegram._parse_manual(base + " / scalp / vip")
+  scalp = wiring._parse_manual(base + " / scalp / vip")
   assert scalp["visibility"] == "vip"
   assert scalp["setup_type"] == "scalp"
