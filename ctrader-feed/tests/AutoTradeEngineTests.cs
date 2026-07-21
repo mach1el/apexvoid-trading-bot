@@ -210,7 +210,7 @@ public sealed class AutoTradeEngineTests
     };
     var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
 
-    var error = await Assert.ThrowsAsync<InvalidOperationException>(
+    var error = await Assert.ThrowsAsync<AutoTradeConfigurationException>(
       () => engine.RunSessionAsync(client, Symbol, CancellationToken.None)
     );
 
@@ -243,10 +243,58 @@ public sealed class AutoTradeEngineTests
     };
     var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
 
-    await Assert.ThrowsAsync<InvalidOperationException>(
+    await Assert.ThrowsAsync<AutoTradeConfigurationException>(
       () => engine.RunSessionAsync(client, Symbol, CancellationToken.None)
     );
     Assert.Empty(client.Orders);
+  }
+
+  [Fact]
+  public void AccountNotGrantedMessageListsGrantsAndRemediation()
+  {
+    var error = AutoTradeConfigurationException.AccountNotGranted(
+      47948104,
+      [new(44669326, true), new(47764564, false)]
+    );
+
+    Assert.Contains("account 47948104", error.Message);
+    Assert.Contains("44669326 live, 47764564 demo", error.Message);
+    Assert.Contains("Re-authorize the app for 47948104", error.Message);
+    Assert.Contains("put the new tokens in .env, then restart", error.Message);
+    Assert.Contains("cached rotation chain resets automatically", error.Message);
+  }
+
+  [Fact]
+  public async Task LiveGrantPublishesWarningWithoutBlockingDemoByDefault()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient
+    {
+      Grants = [new(44669326, true), new(123, false)],
+    };
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await WaitForEventAsync(store, "warning");
+
+    var warning = Assert.Single(store.Events, item => item.Type == "warning");
+    Assert.Equal(
+      "token grants live account 44669326 — re-authorize with the demo account only",
+      warning.Message
+    );
+    Assert.True(engine.Enabled);
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  private static async Task WaitForEventAsync(FakeAutoTradeStore store, string type)
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+    while (!store.Events.Any(item => item.Type == type))
+    {
+      await Task.Delay(10, cts.Token);
+    }
   }
 
   private static AutoTradeOptions Options() => new(
@@ -308,10 +356,15 @@ public sealed class AutoTradeEngineTests
       remove { }
     }
     public TradingAccountSnapshot Account { get; init; } = ValidAccount();
+    public IReadOnlyList<TradingAccountGrant> Grants { get; init; } = [new(123, false)];
     public List<MarketOrderRequest> Orders { get; } = [];
     public List<(long PositionId, decimal StopLoss)> StopAmendments { get; } = [];
     public List<(long PositionId, long Volume)> Closes { get; } = [];
     private readonly List<TradingPosition> _positions = [];
+
+    public Task<IReadOnlyList<TradingAccountGrant>> GetAccountGrantsAsync(
+      CancellationToken cancellationToken
+    ) => Task.FromResult(Grants);
 
     public Task<TradingAccountSnapshot> GetTradingAccountAsync(
       CancellationToken cancellationToken

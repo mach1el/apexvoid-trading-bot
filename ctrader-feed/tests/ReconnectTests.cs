@@ -86,6 +86,154 @@ public sealed class ReconnectTests
     );
   }
 
+  [Fact]
+  public async Task AutoTradeFaultDoesNotCancelFeedAndBarStillReachesSink()
+  {
+    using var temp = new TempHeartbeat();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sink = new RecordingSink();
+    var store = new FaultAutoTradeStore();
+    var client = new FakeCTraderClient
+    {
+      TradingAccountException = new AutoTradeConfigurationException(
+        "Auto trade disabled: incident replay"
+      ),
+      Live = [Raw(1_500), Raw(1_800)],
+      CancelAfterLiveBars = () => cts.Cancel(),
+    };
+    var runner = new FeedRunner(
+      TestOptions(temp.Path),
+      () => client,
+      sink,
+      new HealthFile(temp.Path),
+      _ => TimeSpan.Zero,
+      autoTrade: new AutoTradeEngine(AutoOptions(), store, log: _ => { })
+    );
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(
+      () => runner.RunOneSessionAsync(cts.Token)
+    );
+
+    Assert.Contains(sink.Writes, item => item.Bar.Timestamp == 1_500);
+    var error = Assert.Single(store.Events, item => item.Type == "error");
+    Assert.Equal("Auto trade disabled: incident replay", error.Message);
+  }
+
+  [Fact]
+  public async Task ConfigurationFaultDisablesAutoTradeAcrossFeedReconnects()
+  {
+    using var temp = new TempHeartbeat();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FaultAutoTradeStore();
+    var first = new FakeCTraderClient
+    {
+      TradingAccountException = new AutoTradeConfigurationException(
+        "Auto trade disabled: bad account"
+      ),
+      ThrowAfterLiveStart = true,
+    };
+    var second = new FakeCTraderClient
+    {
+      CancelOnLiveStart = () => cts.Cancel(),
+    };
+    var clients = new Queue<FakeCTraderClient>([first, second]);
+    var runner = new FeedRunner(
+      TestOptions(temp.Path),
+      () => clients.Dequeue(),
+      new RecordingSink(),
+      new HealthFile(temp.Path),
+      _ => TimeSpan.Zero,
+      autoTrade: new AutoTradeEngine(AutoOptions(), store, log: _ => { })
+    );
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(
+      () => runner.RunForeverAsync(cts.Token)
+    );
+
+    Assert.Equal(1, first.TradingAccountRequests);
+    Assert.Equal(0, second.TradingAccountRequests);
+    Assert.Single(store.Events, item => item.Type == "error");
+    Assert.Equal(0, store.CandidateReads);
+  }
+
+  [Fact]
+  public async Task TransientAutoTradeFaultRetriesOnNextFeedSession()
+  {
+    using var temp = new TempHeartbeat();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FaultAutoTradeStore();
+    var first = new FakeCTraderClient
+    {
+      TradingAccountException = new IOException("temporary trading API outage"),
+      ThrowAfterLiveStart = true,
+    };
+    var second = new FakeCTraderClient
+    {
+      CancelOnLiveStart = () => cts.Cancel(),
+    };
+    var clients = new Queue<FakeCTraderClient>([first, second]);
+    var runner = new FeedRunner(
+      TestOptions(temp.Path),
+      () => clients.Dequeue(),
+      new RecordingSink(),
+      new HealthFile(temp.Path),
+      _ => TimeSpan.Zero,
+      autoTrade: new AutoTradeEngine(AutoOptions(), store, log: _ => { })
+    );
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(
+      () => runner.RunForeverAsync(cts.Token)
+    );
+
+    Assert.Equal(1, first.TradingAccountRequests);
+    Assert.Equal(1, second.TradingAccountRequests);
+    Assert.Single(store.Events, item => item.Type == "error");
+    Assert.Single(store.Events, item => item.Type == "ready");
+  }
+
+  [Fact]
+  public async Task StrictLiveGrantDisablesAutoTradeWhileFeedKeepsStreaming()
+  {
+    using var temp = new TempHeartbeat();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var sink = new RecordingSink();
+    var store = new FaultAutoTradeStore();
+    var client = new FakeCTraderClient
+    {
+      Grants = [new(44669326, true), new(47948104, false)],
+      Live = [Raw(1_500), Raw(1_800)],
+      CancelAfterLiveBars = () => cts.Cancel(),
+    };
+    var runner = new FeedRunner(
+      TestOptions(temp.Path),
+      () => client,
+      sink,
+      new HealthFile(temp.Path),
+      _ => TimeSpan.Zero,
+      autoTrade: new AutoTradeEngine(
+        AutoOptions() with { RequireDemoOnlyToken = true },
+        store,
+        log: _ => { }
+      )
+    );
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(
+      () => runner.RunOneSessionAsync(cts.Token)
+    );
+
+    Assert.Contains(sink.Writes, item => item.Bar.Timestamp == 1_500);
+    Assert.Contains(
+      store.Events,
+      item => item.Type == "warning" && item.Message.Contains("44669326")
+    );
+    Assert.Contains(
+      store.Events,
+      item => item.Type == "error" && item.Message.Contains("demo-only token")
+    );
+    Assert.Equal(0, client.TradingAccountRequests);
+    Assert.Equal(0, store.CandidateReads);
+  }
+
   private static FeedOptions TestOptions(string heartbeatPath) =>
     new(
       ClientId: "client",
@@ -109,6 +257,24 @@ public sealed class ReconnectTests
       TokenRefreshInterval: TimeSpan.FromHours(1)
     );
 
+  private static AutoTradeOptions AutoOptions() => new(
+    Enabled: true,
+    DryRun: true,
+    ExpectedBroker: "Fusion",
+    StopLossDistance: 6.5m,
+    TargetsPips: [30, 50, 70, 90, 130],
+    CandidateMaxAgeSeconds: 90,
+    SpotMaxAgeSeconds: 5,
+    MaxSpreadPips: 5,
+    MaxEntryDistancePips: 10,
+    MaxDailyTrades: 6,
+    MinConfluence: 2,
+    PollMilliseconds: 10,
+    CandidateStream: "auto_trade:candidates",
+    EventStream: "auto_trade:events",
+    Label: "apexvoid-auto"
+  );
+
   private static RawTrendbar Raw(long timestamp) =>
     new(
       "M5",
@@ -121,7 +287,7 @@ public sealed class ReconnectTests
     );
 }
 
-internal sealed class FakeCTraderClient : ICTraderFeedClient
+internal sealed class FakeCTraderClient : ICTraderFeedClient, ICTraderTradeClient
 {
   public event Action? Heartbeat;
 
@@ -134,7 +300,12 @@ internal sealed class FakeCTraderClient : ICTraderFeedClient
   public bool ThrowAfterLiveStart { get; init; }
   public Action? OnLiveStart { get; init; }
   public Action? CancelOnLiveStart { get; init; }
+  public Action? CancelAfterLiveBars { get; init; }
   public int HeartbeatsOnLiveStart { get; init; }
+  public IReadOnlyList<RawTrendbar> Live { get; init; } = [];
+  public IReadOnlyList<TradingAccountGrant> Grants { get; init; } = [new(123, false)];
+  public Exception? TradingAccountException { get; init; }
+  public int TradingAccountRequests { get; private set; }
 
   public Task ConnectAndAuthorizeAsync(CancellationToken cancellationToken)
   {
@@ -161,6 +332,18 @@ internal sealed class FakeCTraderClient : ICTraderFeedClient
   {
     BackfillCount++;
     BackfillRequests.Add((from, to));
+    var matchingLiveBars = Live.Where(raw =>
+      DateTimeOffset.FromUnixTimeSeconds(
+        checked((long)raw.UtcTimestampInMinutes * 60)
+      ) >= from
+      && DateTimeOffset.FromUnixTimeSeconds(
+        checked((long)raw.UtcTimestampInMinutes * 60)
+      ) <= to
+    ).ToArray();
+    if (matchingLiveBars.Length > 0)
+    {
+      return Task.FromResult<IReadOnlyList<RawTrendbar>>(matchingLiveBars);
+    }
     return Task.FromResult(Backfill);
   }
 
@@ -188,6 +371,11 @@ internal sealed class FakeCTraderClient : ICTraderFeedClient
     {
       throw new IOException("simulated disconnect");
     }
+    foreach (var raw in Live)
+    {
+      yield return raw;
+    }
+    CancelAfterLiveBars?.Invoke();
     await Task.Delay(TimeSpan.FromMinutes(5), cancellationToken);
     yield break;
   }
@@ -201,6 +389,135 @@ internal sealed class FakeCTraderClient : ICTraderFeedClient
   }
 
   public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+  public Task<IReadOnlyList<TradingAccountGrant>> GetAccountGrantsAsync(
+    CancellationToken cancellationToken
+  ) => Task.FromResult(Grants);
+
+  public Task<TradingAccountSnapshot> GetTradingAccountAsync(
+    CancellationToken cancellationToken
+  )
+  {
+    TradingAccountRequests++;
+    return TradingAccountException is not null
+      ? Task.FromException<TradingAccountSnapshot>(TradingAccountException)
+      : Task.FromResult(new TradingAccountSnapshot(
+        123,
+        IsLive: false,
+        PermissionScope: "ScopeTrade",
+        AccessRights: "FullAccess",
+        AccountType: "Hedged",
+        BrokerName: "Fusion Markets",
+        Balance: 1_000m
+      ));
+  }
+
+  public Task<IReadOnlyList<TradingPosition>> ReconcilePositionsAsync(
+    CancellationToken cancellationToken
+  ) => Task.FromResult<IReadOnlyList<TradingPosition>>([]);
+
+  public Task<TradeExecution> PlaceMarketOrderAsync(
+    MarketOrderRequest order,
+    CancellationToken cancellationToken
+  ) => throw new NotSupportedException();
+
+  public Task AmendPositionStopLossAsync(
+    long positionId,
+    decimal stopLoss,
+    CancellationToken cancellationToken
+  ) => throw new NotSupportedException();
+
+  public Task<TradeExecution> ClosePositionAsync(
+    long positionId,
+    long volume,
+    CancellationToken cancellationToken
+  ) => throw new NotSupportedException();
+}
+
+internal sealed class FaultAutoTradeStore : IAutoTradeStore
+{
+  public List<AutoTradeEvent> Events { get; } = [];
+  public int CandidateReads { get; private set; }
+
+  public Task<string> GetCursorAsync(CancellationToken cancellationToken) =>
+    Task.FromResult("0-0");
+
+  public Task SetCursorAsync(string cursor, CancellationToken cancellationToken) =>
+    Task.CompletedTask;
+
+  public Task<IReadOnlyList<TradeStreamEntry>> ReadCandidatesAsync(
+    string stream,
+    string afterId,
+    int count,
+    CancellationToken cancellationToken
+  )
+  {
+    CandidateReads++;
+    return Task.FromResult<IReadOnlyList<TradeStreamEntry>>([]);
+  }
+
+  public Task<bool> TryClaimCandidateAsync(
+    string candidateId,
+    CancellationToken cancellationToken
+  ) => Task.FromResult(false);
+
+  public Task<string?> GetCandidateStatusAsync(
+    string candidateId,
+    CancellationToken cancellationToken
+  ) => Task.FromResult<string?>(null);
+
+  public Task CompleteCandidateAsync(
+    string candidateId,
+    string outcome,
+    CancellationToken cancellationToken
+  ) => Task.CompletedTask;
+
+  public Task ReleaseCandidateAsync(
+    string candidateId,
+    CancellationToken cancellationToken
+  ) => Task.CompletedTask;
+
+  public Task SavePositionAsync(
+    AutoTradePositionState state,
+    CancellationToken cancellationToken
+  ) => Task.CompletedTask;
+
+  public Task<AutoTradePositionState?> GetPositionAsync(
+    long positionId,
+    CancellationToken cancellationToken
+  ) => Task.FromResult<AutoTradePositionState?>(null);
+
+  public Task<IReadOnlyList<long>> GetTrackedPositionIdsAsync(
+    CancellationToken cancellationToken
+  ) => Task.FromResult<IReadOnlyList<long>>([]);
+
+  public Task DeletePositionAsync(
+    long positionId,
+    CancellationToken cancellationToken
+  ) => Task.CompletedTask;
+
+  public Task<long> GetDailyTradeCountAsync(
+    DateOnly date,
+    CancellationToken cancellationToken
+  ) => Task.FromResult(0L);
+
+  public Task<long> IncrementDailyTradeCountAsync(
+    DateOnly date,
+    CancellationToken cancellationToken
+  ) => Task.FromResult(1L);
+
+  public Task<bool> IsPausedAsync(CancellationToken cancellationToken) =>
+    Task.FromResult(false);
+
+  public Task PublishAutoTradeEventAsync(
+    string stream,
+    AutoTradeEvent tradeEvent,
+    CancellationToken cancellationToken
+  )
+  {
+    Events.Add(tradeEvent);
+    return Task.CompletedTask;
+  }
 }
 
 internal sealed class RecordingSink : IBarSink
