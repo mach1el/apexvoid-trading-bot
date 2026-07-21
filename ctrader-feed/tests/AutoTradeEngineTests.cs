@@ -77,6 +77,89 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
+  public async Task BoxRangeScalpClosesFullVolumeAtItsSingleTarget()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 70))
+    {
+      DailyTradeCount = 100,
+    };
+    var client = new FakeTradingClient();
+    var engine = new AutoTradeEngine(
+      Options() with { ZoneFillEnabled = true },
+      store,
+      () => Now,
+      _ => { }
+    );
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    var order = Assert.Single(client.Orders);
+    Assert.True(order.Volume > 0);
+    Assert.Equal(101, store.DailyTradeCount);
+    Assert.Empty(client.LimitOrders);
+    Assert.Contains($"|{order.Volume}|70|1|", order.Comment);
+    var opened = Assert.Single(store.Events, item => item.Type == "opened");
+    Assert.Contains("full TP 70p", opened.Message);
+    Assert.Contains("range 4,000.00-4,008.00", opened.Message);
+
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4007.2m, 4007.4m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    Assert.Equal((91, order.Volume), Assert.Single(client.Closes));
+    var takeProfit = Assert.Single(
+      store.Events,
+      item => item.Type == "take_profit"
+    );
+    Assert.Equal(70, takeProfit.TargetPips);
+    Assert.StartsWith("FULL TP +70 pips", takeProfit.Message);
+    Assert.DoesNotContain(store.Events, item => item.Type == "stop_moved");
+    Assert.Empty(store.Positions);
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
+  public async Task BoxRangeScalpNeverScalesIntoAnOpenPosition()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 50));
+    var client = new FakeTradingClient();
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    store.EnqueueCandidate(BoxCandidateJson(
+      candidate: 'b',
+      direction: "SELL",
+      fullTpPips: 50,
+      structureSwing: 4006.2m
+    ));
+    await WaitForEventAsync(store, "rejected");
+
+    Assert.Single(client.Orders);
+    Assert.Contains(store.Events, item =>
+      item.Type == "rejected"
+      && item.Message.Contains("waits for flat XAU exposure")
+    );
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
   public async Task RejectsMomentumCandidateAsUnsupported()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -622,7 +705,6 @@ public sealed class AutoTradeEngineTests
     SpotMaxAgeSeconds: 5,
     MaxSpreadPips: 5,
     MaxEntryDistancePips: 10,
-    MaxDailyTrades: 6,
     MinConfluence: 2,
     PollMilliseconds: 10,
     CandidateStream: "auto_trade:candidates",
@@ -677,6 +759,40 @@ public sealed class AutoTradeEngineTests
     bos_direction = direction == "BUY" ? "up" : "down",
     bos_ts = 1_000,
     opposing_level_distance_atr = 2.0,
+  });
+
+  private static string BoxCandidateJson(
+    int fullTpPips,
+    string direction = "BUY",
+    char candidate = 'a',
+    decimal? structureSwing = null
+  ) => JsonSerializer.Serialize(new
+  {
+    version = 3,
+    candidate_id = new string(candidate, 64),
+    symbol = "XAU",
+    timeframe = "M1",
+    setup = "Range Box Scalp",
+    mode = "auto_box_scalp",
+    direction,
+    trigger_ts = "1000",
+    created_at = 1_000,
+    spot_ts = 1_000,
+    current_price = 4000.1,
+    key_level = direction == "BUY" ? 4000.0 : 4008.0,
+    entry_zone = direction == "BUY"
+      ? new { low = 3999.5m, high = 4000.5m }
+      : new { low = 4007.8m, high = 4008.2m },
+    confluence = 2,
+    reasons = new[] { "M1 range rejection", $"full TP {fullTpPips} pips" },
+    bar_ts = 1_000,
+    atr = 1.0,
+    structure_swing = structureSwing
+      ?? (direction == "BUY" ? 3998.0m : 4002.5m),
+    range_id = "xau-8000-8016",
+    range_low = 4000.0,
+    range_high = 4008.0,
+    full_take_profit_pips = fullTpPips,
   });
 
   private sealed class FakeTradingClient : ICTraderFeedClient, ICTraderTradeClient
@@ -927,6 +1043,11 @@ public sealed class AutoTradeEngineTests
     );
     public string Cursor => _cursor;
     private long _daily;
+    public long DailyTradeCount
+    {
+      get => _daily;
+      init => _daily = value;
+    }
 
     public void EnqueueCandidate(string candidatePayload) =>
       _payloads.Add(candidatePayload);

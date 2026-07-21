@@ -13,9 +13,39 @@ def test_render_auto_trade_event_filters_noise_and_escapes_message():
     "message": "BUY <0.12> lots",
     "position_id": 91,
   })
-  assert "Auto trade opened" in text
+  assert "ApexVoid Algo" in text
+  assert "Position opened" in text
   assert "BUY &lt;0.12&gt; lots" in text
   assert "<code>91</code>" in text
+  assert "auto trade" not in text.lower()
+
+
+def test_render_box_open_and_full_tp_as_shareable_cards():
+  opened = auto_trade_ops.render_auto_trade_event({
+    "type": "opened",
+    "message": (
+      "Sell 0.04 lots filled 4,066.78, SL 4,070.63 · 39p structure · "
+      "full TP 50p · range 4,062.00-4,069.00 · risk-bound"
+    ),
+    "position_id": 39025496,
+  })
+  take_profit = auto_trade_ops.render_auto_trade_event({
+    "type": "take_profit",
+    "message": "FULL TP +50 pips closed volume 400",
+    "position_id": 39025496,
+    "price": 4061.78,
+  })
+
+  assert "XAU SELL opened" in opened
+  assert "Entry: <b>4,066.78</b>" in opened
+  assert "SL: <b>4,070.63</b> · 39 pips" in opened
+  assert "Full TP: <b>4,061.78</b> · +50 pips" in opened
+  assert "Box: <b>4,062.00–4,069.00</b>" in opened
+  assert opened.count("39025496") == 1
+  assert "FULL TAKE PROFIT" in take_profit
+  assert "Profit: <b>+50 pips</b>" in take_profit
+  assert "Position closed in full" in take_profit
+  assert "Auto trade" not in (opened + take_profit)
 
 
 def test_render_auto_trade_stop_and_warning_events():
@@ -29,10 +59,13 @@ def test_render_auto_trade_stop_and_warning_events():
     "message": "token grants live account 44669326 — re-authorize as demo only",
   })
 
-  assert "Auto trade stop moved" in stop
+  assert "ApexVoid Algo" in stop
+  assert "Risk protected" in stop
+  assert "SL moved to <b>4,029.49</b>" in stop
   assert "BE+3" in stop
-  assert "Auto Trader warning" in warning
+  assert "Warning" in warning
   assert "live account 44669326" in warning
+  assert "auto trade" not in (stop + warning).lower()
 
 
 def test_render_scale_in_zone_and_group_events():
@@ -49,9 +82,10 @@ def test_render_scale_in_zone_and_group_events():
     "message": "realised $42 · no-add $31",
   })
 
-  assert "scale-in" in scale_in
-  assert "zone fill" in zone
-  assert "group result" in result
+  assert "Scale-in filled" in scale_in
+  assert "Entry plan ready" in zone
+  assert "Trade result" in result
+  assert "ApexVoid Algo" in scale_in + zone + result
 
 
 @pytest.mark.asyncio
@@ -91,22 +125,23 @@ async def test_group_stats_split_adds_and_deduplicate():
 async def test_pause_resume_and_status(monkeypatch):
   monkeypatch.setattr(auto_trade_ops.settings, "auto_trade_enabled", True)
   monkeypatch.setattr(auto_trade_ops.settings, "auto_trade_dry_run", False)
-  monkeypatch.setattr(auto_trade_ops.settings, "auto_trade_max_daily_trades", 6)
   await auto_trade_ops.set_auto_trade_paused(True)
   client = redis_state.get_client()
   await client.set(
     "auto_trade:last_gate",
-    '{"state":"waiting_rejection","rail":{"role":"support","low":4016.5,"high":4017.5}}',
+    '{"state":"waiting_rejection","box":{"low":4016.5,"high":4024.5},"full_tp_pips":70}',
   )
   assert await client.get("auto_trade:paused") == "1"
   text = await auto_trade_ops.auto_trade_status_text()
   assert "demo trading" in text
   assert "paused" in text
-  assert "0/6" in text
+  assert "Trades today: <b>0</b> · <b>unlimited</b>" in text
   assert "Measured groups" in text
-  assert "independent M1 range scalp · raw M5/M15 rails" in text
+  assert "ApexVoid Algo" in text
+  assert "independent M1 two-edge box scalp" in text
   assert "waiting_rejection" in text
-  assert "support" in text
-  assert "4,016.50–4,017.50" in text
+  assert "box 4,016.50–4,024.50" in text
+  assert "full TP 70p" in text
+  assert "auto trader" not in text.lower()
   await auto_trade_ops.set_auto_trade_paused(False)
   assert await client.get("auto_trade:paused") is None

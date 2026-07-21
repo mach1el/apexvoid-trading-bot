@@ -40,6 +40,9 @@ public sealed class AutoTradeOptionsTests
     Assert.Throws<AutoTradeConfigurationException>(
       () => (Options() with { ZoneFillTtlBars = 0 }).Validate()
     );
+    Assert.Throws<AutoTradeConfigurationException>(
+      () => (Options() with { BoxMinRiskReward = 0.9m }).Validate()
+    );
   }
 
   private static AutoTradeOptions Options() => new(
@@ -54,7 +57,6 @@ public sealed class AutoTradeOptionsTests
     SpotMaxAgeSeconds: 5,
     MaxSpreadPips: 5,
     MaxEntryDistancePips: 10,
-    MaxDailyTrades: 6,
     MinConfluence: 2,
     PollMilliseconds: 10,
     CandidateStream: "auto_trade:candidates",

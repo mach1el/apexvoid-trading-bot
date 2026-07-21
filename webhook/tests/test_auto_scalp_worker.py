@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from app import auto_scalp_worker, redis_state, scanner
-from app.auto_scalp_gate import AutoScalpDecision, AutoScalpRail
+from app.auto_scalp_gate import AutoScalpBox, AutoScalpDecision, AutoScalpRail
 from app.auto_scale_context import AutoScaleContext
 
 
@@ -23,7 +23,7 @@ def _frame() -> pd.DataFrame:
 
 
 def _decision() -> AutoScalpDecision:
-  rail = AutoScalpRail(
+  support = AutoScalpRail(
     "support",
     4016.5,
     4017.1,
@@ -33,12 +33,26 @@ def _decision() -> AutoScalpDecision:
     ("M5", "M15"),
     ("M5 swing-low", "M15 range-low"),
   )
+  resistance = AutoScalpRail(
+    "resistance",
+    4024.8,
+    4025.4,
+    4025.1,
+    3,
+    8.0,
+    ("M5", "M15"),
+    ("M5 swing-high", "M15 range-high"),
+  )
+  box = AutoScalpBox("xau-8034-8050", support, resistance, 77.0)
   return AutoScalpDecision(
     "candidate",
     direction="BUY",
     trigger="range_rejection",
-    rail=rail,
-    target_room_pips=42.0,
+    rail=support,
+    target=resistance,
+    target_room_pips=76.0,
+    full_tp_pips=70,
+    box=box,
     confluence=3,
     reasons=("M1 range rejection", "support rail"),
     rail_count=4,
@@ -83,16 +97,25 @@ async def test_worker_publishes_one_durable_auto_only_candidate(monkeypatch):
   assert len(entries) == 1
   payload = json.loads(entries[0][1]["payload"])
   assert payload["candidate_id"] == first
-  assert payload["setup"] == "Auto Range Scalp"
-  assert payload["mode"] == "auto_range_scalp"
+  assert payload["setup"] == "Range Box Scalp"
+  assert payload["mode"] == "auto_box_scalp"
   assert payload["timeframe"] == "M1"
   assert payload["direction"] == "BUY"
   assert payload["entry_zone"] == {"low": 4016.5, "high": 4017.1}
   assert payload["spot_ts"] == now
-  assert payload["version"] == 2
+  assert payload["version"] == 3
+  assert payload["range_id"] == "xau-8034-8050"
+  assert payload["range_low"] == 4016.8
+  assert payload["range_high"] == 4025.1
+  assert payload["full_take_profit_pips"] == 70
   assert payload["structure_swing"] == 4014.8
   assert payload["displacement_age_bars"] == 1
   assert payload["bos_direction"] == "up"
+  assert await client.exists(auto_scalp_worker._box_edge_key(
+    "XAU",
+    "xau-8034-8050",
+    "BUY",
+  ))
 
 
 @pytest.mark.asyncio
@@ -115,6 +138,11 @@ async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
     "evaluate_auto_scalp_gate",
     lambda frames, **kwargs: _decision(),
   )
+  monkeypatch.setattr(
+    auto_scalp_worker,
+    "build_auto_scale_context",
+    lambda *args, **kwargs: _scale_context(now),
+  )
   forming = AsyncMock()
   monkeypatch.setattr(scanner, "_handle_event", forming)
 
@@ -131,6 +159,68 @@ async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
   assert status["state"] == "candidate"
   assert status["rail"]["role"] == "support"
   assert status["rail"]["timeframes"] == ["M5", "M15"]
+  assert status["box"]["id"] == "xau-8034-8050"
+  assert status["full_tp_pips"] == 70
+
+
+@pytest.mark.asyncio
+async def test_broken_box_is_retired_and_cannot_publish_again(monkeypatch):
+  client = redis_state.get_client()
+  monkeypatch.setattr(
+    auto_scalp_worker.settings,
+    "auto_trade_box_retire_seconds",
+    3600,
+  )
+  candidate = _decision()
+  broken = AutoScalpDecision(
+    "box_broken",
+    box=candidate.box,
+    reasons=("accepted outside",),
+  )
+
+  result = await auto_scalp_worker._apply_box_retirement(
+    client,
+    "XAU",
+    broken,
+  )
+  retired = await auto_scalp_worker._apply_box_retirement(
+    client,
+    "XAU",
+    candidate,
+  )
+
+  assert result.state == "box_broken"
+  assert retired.state == "box_retired"
+  assert "already retired" in retired.reasons[-1]
+
+
+@pytest.mark.asyncio
+async def test_used_edge_rearms_only_after_midpoint_close():
+  client = redis_state.get_client()
+  decision = _decision()
+  key = auto_scalp_worker._box_edge_key(
+    "XAU",
+    decision.box.box_id,
+    "BUY",
+  )
+  await client.set(key, "1")
+
+  blocked = await auto_scalp_worker._apply_box_retirement(
+    client,
+    "XAU",
+    decision,
+    price=4017.0,
+  )
+  rearmed = await auto_scalp_worker._apply_box_retirement(
+    client,
+    "XAU",
+    decision,
+    price=4022.0,
+  )
+
+  assert blocked.state == "edge_disarmed"
+  assert rearmed.state == "candidate"
+  assert not await client.exists(key)
 
 
 @pytest.mark.asyncio
