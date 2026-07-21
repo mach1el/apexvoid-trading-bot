@@ -567,6 +567,31 @@ public sealed class AutoTradeEngineTests
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
   }
 
+  [Fact]
+  public async Task SessionCleanupDoesNotRaceQueuedSpotIntoDisconnectedClient()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient { FailReconcileCall = 2 };
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await client.ReconcileFaultEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    var spot = engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000m, 4000.2m, 1_000),
+      cts.Token
+    );
+    client.ReleaseReconcileFault.TrySetResult(true);
+
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() => run);
+    await spot;
+    Assert.Equal("Trading account is not authorized", error.Message);
+    Assert.DoesNotContain(
+      store.Events,
+      item => item.Message.Contains("session is not connected")
+    );
+  }
+
   private static async Task WaitForEventAsync(FakeAutoTradeStore store, string type)
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -670,9 +695,17 @@ public sealed class AutoTradeEngineTests
     public List<(long PositionId, decimal StopLoss)> StopAmendments { get; } = [];
     public List<(long PositionId, long Volume)> Closes { get; } = [];
     public int? FailAmendmentCall { get; init; }
+    public int? FailReconcileCall { get; init; }
+    public TaskCompletionSource<bool> ReconcileFaultEntered { get; } = new(
+      TaskCreationOptions.RunContinuationsAsynchronously
+    );
+    public TaskCompletionSource<bool> ReleaseReconcileFault { get; } = new(
+      TaskCreationOptions.RunContinuationsAsynchronously
+    );
     private readonly List<TradingPosition> _positions = [];
     private readonly Queue<decimal> _marketExecutionPrices = [];
     private int _amendmentCalls;
+    private int _reconcileCalls;
     private long _nextPositionId = 91;
     private long _nextOrderId = 81;
 
@@ -718,6 +751,23 @@ public sealed class AutoTradeEngineTests
     ) => Task.FromResult<IReadOnlyList<TradingPendingOrder>>(
       PendingOrders.ToArray()
     );
+
+    public async Task<TradingReconcileSnapshot> ReconcileAccountAsync(
+      CancellationToken cancellationToken
+    )
+    {
+      _reconcileCalls++;
+      if (_reconcileCalls == FailReconcileCall)
+      {
+        ReconcileFaultEntered.TrySetResult(true);
+        await ReleaseReconcileFault.Task.WaitAsync(cancellationToken);
+        throw new InvalidOperationException("Trading account is not authorized");
+      }
+      return new TradingReconcileSnapshot(
+        _positions.ToArray(),
+        PendingOrders.ToArray()
+      );
+    }
 
     public Task<TradeExecution> PlaceMarketOrderAsync(
       MarketOrderRequest order,
