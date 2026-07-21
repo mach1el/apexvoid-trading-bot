@@ -17,84 +17,66 @@ public sealed class VolumePlannerTests
   );
 
   [Theory]
-  [InlineData(875.21, 0.02, 200)]
-  [InlineData(2000, 0.06, 600)]
-  public void SizesFromRiskAndFloorsToBrokerStep(
+  [InlineData(199, 0)]
+  [InlineData(200, 0.02)]
+  [InlineData(499, 0.04)]
+  [InlineData(500, 0.05)]
+  [InlineData(875, 0.09)]
+  [InlineData(999, 0.10)]
+  [InlineData(1000, 0.11)]
+  [InlineData(1500, 0.16)]
+  [InlineData(2000, 0.21)]
+  [InlineData(2500, 0.26)]
+  [InlineData(3000, 0.31)]
+  [InlineData(4000, 0.33)]
+  [InlineData(4999, 0.35)]
+  [InlineData(5000, 0.36)]
+  [InlineData(10000, 0.36)]
+  public void MapsBalanceBandsAndFloorsToOneCentLotStep(
     double balance,
-    double expectedLots,
-    long expectedVolume
+    double expectedLots
   )
   {
-    var result = Size(Convert.ToDecimal(balance));
-
-    Assert.Equal(Convert.ToDecimal(expectedLots), result.Lots);
-    Assert.Equal(expectedVolume, result.Volume);
-    Assert.Equal(65m, result.StopPips);
-    var impliedRisk = result.Lots * result.StopPips * 10m;
-    Assert.True(impliedRisk <= Convert.ToDecimal(balance) * 0.02m);
-  }
-
-  [Fact]
-  public void BelowMinimumRejectsWithArithmetic()
-  {
-    var error = Assert.Throws<VolumePlanningException>(() => Size(300m));
-
-    Assert.Contains("balance 300.00 × 2% = $6.00", error.Message);
-    Assert.Contains("0.009 lots", error.Message);
-    Assert.Contains("below the 0.01 minimum", error.Message);
-  }
-
-  [Fact]
-  public void MaximumLotsCapsRunawayBalance()
-  {
-    var result = Size(decimal.MaxValue);
-
-    Assert.Equal(1m, result.Lots);
-    Assert.Equal(10_000, result.Volume);
-  }
-
-  [Fact]
-  public void FiveTargetFeasibilityRejectsTwoStepsWithComputedRemedy()
-  {
-    var sizing = Size(875.21m);
-
-    var error = Assert.Throws<VolumePlanningException>(() =>
-      VolumePlanner.EnsureTargetFeasibility(
-        sizing,
-        875.21m,
-        2m,
-        10m,
-        5,
-        Symbol
-      )
-    );
-
-    Assert.Contains("0.02 lots = 2 steps; 5 targets need 5", error.Message);
-    Assert.Contains("balance ≥ $1,625", error.Message);
-    Assert.Contains("stop ≤ 30 pips", error.Message);
-  }
-
-  [Fact]
-  public void FiveStepsSplitIntoOneStepPerTarget()
-  {
-    var sizing = Size(1_625m);
-    VolumePlanner.EnsureTargetFeasibility(
-      sizing,
-      1_625m,
-      2m,
-      10m,
-      5,
-      Symbol
-    );
-
     Assert.Equal(
-      new long[] { 100, 100, 100, 100, 100 },
-      VolumePlanner.SplitWeighted(
-        sizing.Volume,
-        Symbol,
-        [20, 20, 20, 20, 20]
-      )
+      Convert.ToDecimal(expectedLots),
+      VolumePlanner.LotsForBalance(Convert.ToDecimal(balance))
     );
+  }
+
+  [Fact]
+  public void ConvertsLotsToBrokerVolume()
+  {
+    Assert.Equal(200, VolumePlanner.VolumeForLots(0.02m, Symbol));
+    Assert.Equal(900, VolumePlanner.VolumeForLots(0.09m, Symbol));
+  }
+
+  [Theory]
+  [InlineData(200, new[] { 30, 90 }, new[] { 1, 3 })]
+  [InlineData(300, new[] { 30, 60, 90 }, new[] { 1, 2, 3 })]
+  [InlineData(400, new[] { 30, 60, 90, 120 }, new[] { 1, 2, 3, 4 })]
+  [InlineData(500, new[] { 30, 60, 90, 120, 200 }, new[] { 1, 2, 3, 4, 5 })]
+  public void AdaptsTargetsToAvailableBrokerSteps(
+    long volume,
+    int[] expectedTargets,
+    int[] expectedOrdinals
+  )
+  {
+    var plan = Plan(volume);
+
+    Assert.Equal(expectedTargets, plan.TargetsPips);
+    Assert.Equal(expectedOrdinals, plan.TargetOrdinals);
+    Assert.Equal(
+      Enumerable.Repeat(100L, expectedTargets.Length),
+      plan.Slices
+    );
+  }
+
+  [Fact]
+  public void RejectsVolumeThatCannotSupportTwoExits()
+  {
+    var error = Assert.Throws<VolumePlanningException>(() => Plan(100));
+
+    Assert.Contains("minimum two broker-valid exits", error.Message);
   }
 
   [Fact]
@@ -121,13 +103,11 @@ public sealed class VolumePlannerTests
     }
   }
 
-  private static RiskSizingResult Size(decimal balance) =>
-    VolumePlanner.SizeForRisk(
-      balance,
-      riskPercent: 2m,
-      stopDistance: 6.5m,
-      pipValuePerLot: 10m,
-      maxLots: 1m,
-      Symbol
+  private static TargetVolumePlan Plan(long volume) =>
+    VolumePlanner.BuildTargetPlan(
+      volume,
+      Symbol,
+      [30, 60, 90, 120, 200],
+      [20, 20, 20, 20, 20]
     );
 }

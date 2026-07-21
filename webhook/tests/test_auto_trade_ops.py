@@ -26,13 +26,13 @@ def test_render_auto_trade_stop_and_warning_events():
   })
   warning = auto_trade_ops.render_auto_trade_event({
     "type": "warning",
-    "message": "account deposit asset EUR — pip value assumes USD",
+    "message": "token grants live account 44669326 — re-authorize as demo only",
   })
 
   assert "Auto trade stop moved" in stop
   assert "BE+3" in stop
   assert "Auto Trader warning" in warning
-  assert "deposit asset EUR" in warning
+  assert "live account 44669326" in warning
 
 
 @pytest.mark.asyncio
