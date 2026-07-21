@@ -17,56 +17,117 @@ public sealed class VolumePlannerTests
   );
 
   [Theory]
-  [InlineData(499, 0)]
-  [InlineData(500, 0.08)]
-  [InlineData(999, 0.08)]
-  [InlineData(1000, 0.12)]
-  [InlineData(1999, 0.12)]
-  [InlineData(2000, 0.20)]
-  [InlineData(4999, 0.20)]
-  [InlineData(5000, 0.30)]
-  [InlineData(25000, 0.30)]
-  public void SelectsConfiguredBalanceTier(double balance, double expectedLots)
+  [InlineData(875.21, 0.02, 200)]
+  [InlineData(2000, 0.06, 600)]
+  public void SizesFromRiskAndFloorsToBrokerStep(
+    double balance,
+    double expectedLots,
+    long expectedVolume
+  )
   {
-    Assert.Equal(
-      Convert.ToDecimal(expectedLots),
-      VolumePlanner.LotsForBalance(Convert.ToDecimal(balance))
-    );
+    var result = Size(Convert.ToDecimal(balance));
+
+    Assert.Equal(Convert.ToDecimal(expectedLots), result.Lots);
+    Assert.Equal(expectedVolume, result.Volume);
+    Assert.Equal(65m, result.StopPips);
+    var impliedRisk = result.Lots * result.StopPips * 10m;
+    Assert.True(impliedRisk <= Convert.ToDecimal(balance) * 0.02m);
   }
 
-  [Theory]
-  [InlineData(0.12, 1200)]
-  [InlineData(0.08, 800)]
-  [InlineData(0.20, 2000)]
-  [InlineData(0.30, 3000)]
-  public void ConvertsLotsToBrokerVolume(double lots, long expected)
+  [Fact]
+  public void BelowMinimumRejectsWithArithmetic()
   {
+    var error = Assert.Throws<VolumePlanningException>(() => Size(300m));
+
+    Assert.Contains("balance 300.00 × 2% = $6.00", error.Message);
+    Assert.Contains("0.009 lots", error.Message);
+    Assert.Contains("below the 0.01 minimum", error.Message);
+  }
+
+  [Fact]
+  public void MaximumLotsCapsRunawayBalance()
+  {
+    var result = Size(decimal.MaxValue);
+
+    Assert.Equal(1m, result.Lots);
+    Assert.Equal(10_000, result.Volume);
+  }
+
+  [Fact]
+  public void FiveTargetFeasibilityRejectsTwoStepsWithComputedRemedy()
+  {
+    var sizing = Size(875.21m);
+
+    var error = Assert.Throws<VolumePlanningException>(() =>
+      VolumePlanner.EnsureTargetFeasibility(
+        sizing,
+        875.21m,
+        2m,
+        10m,
+        5,
+        Symbol
+      )
+    );
+
+    Assert.Contains("0.02 lots = 2 steps; 5 targets need 5", error.Message);
+    Assert.Contains("balance ≥ $1,625", error.Message);
+    Assert.Contains("stop ≤ 30 pips", error.Message);
+  }
+
+  [Fact]
+  public void FiveStepsSplitIntoOneStepPerTarget()
+  {
+    var sizing = Size(1_625m);
+    VolumePlanner.EnsureTargetFeasibility(
+      sizing,
+      1_625m,
+      2m,
+      10m,
+      5,
+      Symbol
+    );
+
     Assert.Equal(
-      expected,
-      VolumePlanner.VolumeForLots(Convert.ToDecimal(lots), Symbol)
+      new long[] { 100, 100, 100, 100, 100 },
+      VolumePlanner.SplitWeighted(
+        sizing.Volume,
+        Symbol,
+        [20, 20, 20, 20, 20]
+      )
     );
   }
 
   [Fact]
-  public void SplitsPointTwelveAcrossFiveValidPartialCloses()
+  public void WeightedLargestRemainderProducesExactSteps()
   {
-    Assert.Equal([200, 200, 200, 200, 400], VolumePlanner.SplitFive(1200, Symbol));
+    Assert.Equal(
+      new long[] { 500, 500, 600, 400 },
+      VolumePlanner.SplitWeighted(2_000, Symbol, [25, 25, 30, 20])
+    );
   }
 
   [Fact]
-  public void SplitsLowBalanceTierAcrossFiveValidPartialCloses()
+  public void RoundingProneWeightsStayWithinOneStepAndSumExactly()
   {
-    Assert.Equal([100, 100, 100, 100, 400], VolumePlanner.SplitFive(800, Symbol));
+    var weights = new[] { 17, 19, 23, 41 };
+    var slices = VolumePlanner.SplitWeighted(2_300, Symbol, weights);
+
+    Assert.Equal(2_300, slices.Sum());
+    for (var index = 0; index < weights.Length; index++)
+    {
+      var actualSteps = (decimal)slices[index] / Symbol.StepVolume;
+      var idealSteps = 23m * weights[index] / weights.Sum();
+      Assert.True(Math.Abs(actualSteps - idealSteps) <= 1m);
+    }
   }
 
-  [Theory]
-  [InlineData(2000, 400)]
-  [InlineData(3000, 600)]
-  public void SplitsEvenTiersEqually(long volume, long slice)
-  {
-    Assert.Equal(
-      Enumerable.Repeat(slice, 5),
-      VolumePlanner.SplitFive(volume, Symbol)
+  private static RiskSizingResult Size(decimal balance) =>
+    VolumePlanner.SizeForRisk(
+      balance,
+      riskPercent: 2m,
+      stopDistance: 6.5m,
+      pipValuePerLot: 10m,
+      maxLots: 1m,
+      Symbol
     );
-  }
 }

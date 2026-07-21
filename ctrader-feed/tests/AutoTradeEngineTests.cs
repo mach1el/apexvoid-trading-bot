@@ -25,11 +25,12 @@ public sealed class AutoTradeEngineTests
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(CandidateJson());
     var client = new FakeTradingClient();
+    var logs = new List<string>();
     var engine = new AutoTradeEngine(
       Options(),
       store,
       () => Now,
-      _ => { }
+      logs.Add
     );
     await engine.ObserveSpotAsync(
       new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
@@ -41,28 +42,34 @@ public sealed class AutoTradeEngineTests
 
     var order = Assert.Single(client.Orders);
     Assert.Equal(TradeDirection.Buy, order.Direction);
-    Assert.Equal(1200, order.Volume);
+    Assert.Equal(600, order.Volume);
     Assert.Equal(650_000, order.RelativeStopLoss);
     Assert.Equal("apexvoid-auto", order.Label);
     Assert.StartsWith("av-", order.ClientOrderId);
     Assert.True(order.Comment.Length <= 100);
     Assert.Equal((91, 3993.7m), Assert.Single(client.StopAmendments));
+    Assert.Contains(logs, message => message.Contains("pipValuePerLot=$10.00"));
 
     await engine.ObserveSpotAsync(
-      new SpotPrice("XAU", 4013.2m, 4013.4m, Now.ToUnixTimeSeconds()),
+      new SpotPrice("XAU", 4020.2m, 4020.4m, Now.ToUnixTimeSeconds()),
       cts.Token
     );
 
     Assert.Equal(
-      new long[] { 200, 200, 200, 200, 400 },
+      new long[] { 200, 100, 100, 100, 100 },
       client.Closes.Select(item => item.Volume)
     );
     Assert.Equal(
-      new[] { 30, 50, 70, 90, 130 },
+      new[] { 30, 60, 90, 120, 200 },
       store.Events
         .Where(item => item.Type == "take_profit")
         .Select(item => Assert.IsType<int>(item.TargetPips))
     );
+    Assert.Equal(
+      new decimal[] { 3993.7m, 4000.5m, 4003.2m, 4006.2m, 4009.2m },
+      client.StopAmendments.Select(item => item.StopLoss)
+    );
+    Assert.Equal(4, store.Events.Count(item => item.Type == "stop_moved"));
     Assert.Empty(store.Positions);
 
     cts.Cancel();
@@ -154,13 +161,13 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
-  public async Task DrawnDownDemoBalanceUsesLowTierInsteadOfDisablingTrading()
+  public async Task DrawnDownBalanceRejectsInfeasibleFiveTargetPlan()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(CandidateJson());
     var client = new FakeTradingClient
     {
-      Account = ValidAccount() with { Balance = 920.84m },
+      Account = ValidAccount() with { Balance = 875.21m },
     };
     var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
     await engine.ObserveSpotAsync(
@@ -169,9 +176,12 @@ public sealed class AutoTradeEngineTests
     );
 
     var run = engine.RunSessionAsync(client, Symbol, cts.Token);
-    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    await store.Processed.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-    Assert.Equal(800, Assert.Single(client.Orders).Volume);
+    Assert.Empty(client.Orders);
+    var rejected = Assert.Single(store.Events, item => item.Type == "rejected");
+    Assert.Contains("0.02 lots = 2 steps; 5 targets need 5", rejected.Message);
+    Assert.Contains("balance ≥ $1,625", rejected.Message);
     cts.Cancel();
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
   }
@@ -288,6 +298,121 @@ public sealed class AutoTradeEngineTests
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
   }
 
+  [Fact]
+  public async Task NonUsdAccountWarnsAndStrictModeRefuses()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var warningStore = new FakeAutoTradeStore(CandidateJson());
+    var account = ValidAccount() with { DepositAsset = "EUR" };
+    var warningClient = new FakeTradingClient { Account = account };
+    var warningEngine = new AutoTradeEngine(
+      Options(),
+      warningStore,
+      () => Now,
+      _ => { }
+    );
+
+    var run = warningEngine.RunSessionAsync(warningClient, Symbol, cts.Token);
+    await WaitForEventAsync(warningStore, "warning");
+
+    Assert.Contains(
+      warningStore.Events,
+      item => item.Type == "warning"
+        && item.Message.Contains("deposit asset EUR")
+        && item.Message.Contains("assumes USD")
+    );
+    Assert.True(warningEngine.Enabled);
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+
+    var strictStore = new FakeAutoTradeStore(CandidateJson());
+    var strictEngine = new AutoTradeEngine(
+      Options() with { RequireUsdAccount = true },
+      strictStore,
+      () => Now,
+      _ => { }
+    );
+    var error = await Assert.ThrowsAsync<AutoTradeConfigurationException>(
+      () => strictEngine.RunSessionAsync(
+        new FakeTradingClient { Account = account },
+        Symbol,
+        CancellationToken.None
+      )
+    );
+    Assert.Contains("requires USD", error.Message);
+    Assert.Single(strictStore.Events, item => item.Type == "warning");
+  }
+
+  [Fact]
+  public async Task TrailingAmendFailurePublishesOnceAndEngineContinues()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient { FailAmendmentCall = 2 };
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4003.2m, 4003.4m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4006.2m, 4006.4m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    Assert.Equal(2, client.Closes.Count);
+    Assert.Equal(
+      new decimal[] { 3993.7m, 4003.2m },
+      client.StopAmendments.Select(item => item.StopLoss)
+    );
+    var error = Assert.Single(store.Events, item => item.Type == "error");
+    Assert.Contains("stop amend after TP1 failed", error.Message);
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
+  public async Task LegacyCommentKeepsItsOwnTargetAndSlicePlan()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient();
+    client.SeedPosition(new TradingPosition(
+      91,
+      Symbol.SymbolId,
+      TradeDirection.Buy,
+      600,
+      4000.2m,
+      4000.5m,
+      "apexvoid-auto",
+      "av1|aaaaaaaaaaaaaaaaaaaaaaaa|800|200,200,400|30,50,70"
+    ));
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await WaitForEventAsync(store, "ready");
+
+    var adopted = Assert.Single(store.Positions.Values);
+    Assert.Equal(new[] { 30, 50, 70 }, adopted.TargetsPips);
+    Assert.Equal(new long[] { 200, 200, 400 }, adopted.Slices);
+    Assert.Equal(1, adopted.NextTargetIndex);
+
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4005.2m, 4005.4m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    Assert.Equal((91, 200), Assert.Single(client.Closes));
+    Assert.Equal((91, 4003.2m), Assert.Single(client.StopAmendments));
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
   private static async Task WaitForEventAsync(FakeAutoTradeStore store, string type)
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -302,7 +427,13 @@ public sealed class AutoTradeEngineTests
     DryRun: false,
     ExpectedBroker: "Fusion",
     StopLossDistance: 6.5m,
-    TargetsPips: [30, 50, 70, 90, 130],
+    RiskPercent: 2m,
+    PipValuePerLot: 10m,
+    MaxLots: 1m,
+    RequireUsdAccount: false,
+    TargetsPips: [30, 60, 90, 120, 200],
+    TargetWeights: [20, 20, 20, 20, 20],
+    BreakEvenBufferPips: 3,
     CandidateMaxAgeSeconds: 90,
     SpotMaxAgeSeconds: 5,
     MaxSpreadPips: 5,
@@ -322,13 +453,15 @@ public sealed class AutoTradeEngineTests
     AccessRights: "FullAccess",
     AccountType: "Hedged",
     BrokerName: "Fusion Markets",
-    Balance: 1_000m
+    Balance: 2_000m,
+    DepositAsset: "USD"
   );
 
   private static string CandidateJson(
     string timeframe = "M1",
     string setup = "Auto Range Scalp",
-    string mode = "auto_range_scalp"
+    string mode = "auto_range_scalp",
+    string direction = "BUY"
   ) => JsonSerializer.Serialize(new
   {
     version = 1,
@@ -337,7 +470,7 @@ public sealed class AutoTradeEngineTests
     timeframe,
     setup,
     mode,
-    direction = "BUY",
+    direction,
     trigger_ts = "1000",
     created_at = 1_000,
     spot_ts = 1_000,
@@ -360,7 +493,11 @@ public sealed class AutoTradeEngineTests
     public List<MarketOrderRequest> Orders { get; } = [];
     public List<(long PositionId, decimal StopLoss)> StopAmendments { get; } = [];
     public List<(long PositionId, long Volume)> Closes { get; } = [];
+    public int? FailAmendmentCall { get; init; }
     private readonly List<TradingPosition> _positions = [];
+    private int _amendmentCalls;
+
+    public void SeedPosition(TradingPosition position) => _positions.Add(position);
 
     public Task<IReadOnlyList<TradingAccountGrant>> GetAccountGrantsAsync(
       CancellationToken cancellationToken
@@ -399,7 +536,14 @@ public sealed class AutoTradeEngineTests
       CancellationToken cancellationToken
     )
     {
+      _amendmentCalls++;
+      if (_amendmentCalls == FailAmendmentCall)
+      {
+        throw new IOException("simulated stop amend failure");
+      }
       StopAmendments.Add((positionId, stopLoss));
+      var position = _positions.Single(item => item.PositionId == positionId);
+      _positions[_positions.IndexOf(position)] = position with { StopLoss = stopLoss };
       return Task.CompletedTask;
     }
 
