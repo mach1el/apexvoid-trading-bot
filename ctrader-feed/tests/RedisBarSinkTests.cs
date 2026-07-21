@@ -67,6 +67,18 @@ public sealed class RedisBarSinkTests
     );
   }
 
+  [Fact]
+  public async Task RefreshTokenStoreDeletesConfiguredCacheKey()
+  {
+    var redis = new InMemoryRedisSeriesCommands();
+    redis.Strings["ctrader:test_refresh"] = "cached";
+    var store = new RedisRefreshTokenStore(redis, "ctrader:test_refresh");
+
+    await store.DeleteAsync(CancellationToken.None);
+
+    Assert.DoesNotContain("ctrader:test_refresh", redis.Strings.Keys);
+  }
+
   private static OhlcBar Bar(long ts, decimal close) =>
     new(ts, close - 1, close + 1, close - 2, close, 100);
 }
@@ -172,6 +184,12 @@ internal sealed class InMemoryRedisSeriesCommands : IRedisSeriesCommands
   {
     Strings[key] = value;
     StringWrites.Add((key, value));
+    return Task.CompletedTask;
+  }
+
+  public Task DeleteStringAsync(string key, CancellationToken cancellationToken)
+  {
+    Strings.Remove(key);
     return Task.CompletedTask;
   }
 }
