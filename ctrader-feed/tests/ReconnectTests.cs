@@ -304,7 +304,6 @@ public sealed class ReconnectTests
     SpotMaxAgeSeconds: 5,
     MaxSpreadPips: 5,
     MaxEntryDistancePips: 10,
-    MaxDailyTrades: 6,
     MinConfluence: 2,
     PollMilliseconds: 10,
     CandidateStream: "auto_trade:candidates",

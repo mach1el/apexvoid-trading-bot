@@ -105,6 +105,21 @@ public sealed class VolumePlannerTests
   }
 
   [Fact]
+  public void OneTargetUsesTheEntireBrokerValidVolume()
+  {
+    var plan = VolumePlanner.BuildTargetPlan(
+      100,
+      Symbol,
+      [70],
+      [100]
+    );
+
+    Assert.Equal(new long[] { 100 }, plan.Slices);
+    Assert.Equal(new[] { 70 }, plan.TargetsPips);
+    Assert.Equal(new[] { 1 }, plan.TargetOrdinals);
+  }
+
+  [Fact]
   public void WeightedLargestRemainderProducesExactSteps()
   {
     Assert.Equal(
