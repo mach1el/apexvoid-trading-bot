@@ -50,7 +50,7 @@ public sealed class AutoTradeEngineTests
     Assert.Equal((91, 3993.7m), Assert.Single(client.StopAmendments));
     Assert.Contains(logs, message => message.Contains("dryRun=False"));
     Assert.Contains(
-      "sizing: mode=min balance=2000.00 → table 0.20 lots · risk 0.06 lots",
+      "sizing: mode=min balance=2000.00 → table 0.15 lots · risk 0.06 lots",
       logs
     );
 
@@ -101,7 +101,7 @@ public sealed class AutoTradeEngineTests
     await WaitForEventAsync(store, "ready");
 
     Assert.Contains(
-      "sizing: mode=table balance=2072.02 → table 0.20 lots · risk 0.06 lots",
+      "sizing: mode=table balance=2072.02 → table 0.15 lots · risk 0.06 lots",
       logs
     );
     cts.Cancel();
@@ -665,7 +665,7 @@ public sealed class AutoTradeEngineTests
     var add = Assert.Single(store.Events, item => item.Type == "add");
     Assert.Equal(2, add.TrancheIndex);
     Assert.Equal("aaaaaaaaaa", add.GroupId);
-    Assert.Contains("add-cap-bound", add.Message);
+    Assert.Contains("exposure-bound", add.Message);
 
     cts.Cancel();
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -734,15 +734,15 @@ public sealed class AutoTradeEngineTests
       client.LimitOrders.Select(order => order.LimitPrice)
     );
     Assert.Equal(
-      new long[] { 1_000, 1_000 },
+      new long[] { 800, 700 },
       client.LimitOrders.Select(order => order.Volume)
     );
-    Assert.Equal(2_000, client.LimitOrders.Sum(order => order.Volume));
+    Assert.Equal(1_500, client.LimitOrders.Sum(order => order.Volume));
     Assert.All(client.LimitOrders, order => Assert.StartsWith("avz|", order.Comment));
     Assert.Contains(
       store.Events,
       item => item.Type == "zone_planned"
-        && item.Message.Contains("sizing=table lots=0.20")
+        && item.Message.Contains("sizing=table lots=0.15")
     );
 
     client.FillPendingOrder(client.PendingOrders[0].OrderId);
@@ -754,7 +754,7 @@ public sealed class AutoTradeEngineTests
     await WaitUntilAsync(() => store.Positions.Count == 1);
     var filled = Assert.Single(store.Positions.Values);
     Assert.Equal(1, filled.ZoneLeg);
-    Assert.Equal(1_000, filled.InitialVolume);
+    Assert.Equal(800, filled.InitialVolume);
     Assert.Equal(5, filled.TargetsPips.Count);
 
     cts.Cancel();
@@ -771,7 +771,7 @@ public sealed class AutoTradeEngineTests
     ));
     var client = new FakeTradingClient
     {
-      Account = ValidAccount() with { Balance = 500m },
+      Account = ValidAccount() with { Balance = 900m },
     };
     var logs = new List<string>();
     var engine = new AutoTradeEngine(
@@ -794,19 +794,19 @@ public sealed class AutoTradeEngineTests
     await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
     var order = Assert.Single(client.Orders);
-    Assert.Equal(500, order.Volume);
+    Assert.Equal(600, order.Volume);
     Assert.Empty(client.LimitOrders);
     Assert.Contains(
       logs,
       message => message.Contains(
-        "zone-fill skipped: 0.05 lots below 0.09 minimum"
+        "zone-fill skipped: 0.06 lots below 0.09 minimum"
       )
     );
     Assert.Contains(
       store.Events,
       item => item.Type == "opened"
         && item.Message.Contains(
-          "zone-fill skipped: 0.05 lots below 0.09 minimum"
+          "zone-fill skipped: 0.06 lots below 0.09 minimum"
         )
     );
 

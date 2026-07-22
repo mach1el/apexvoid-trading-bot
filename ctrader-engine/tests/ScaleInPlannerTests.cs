@@ -26,12 +26,12 @@ public sealed class ScaleInPlannerTests
     );
 
     Assert.True(decision.Allowed);
-    Assert.Equal(0.07m, decision.Lots);
-    Assert.Equal(700, decision.Volume);
+    Assert.Equal(0.02m, decision.Lots);
+    Assert.Equal(200, decision.Volume);
     Assert.Equal("exposure-bound", decision.BindingTerm);
-    Assert.Equal(0.3m, decision.PostAddWorstCase);
+    Assert.Equal(9.3m, decision.PostAddWorstCase);
     Assert.Equal(40m, decision.Budget);
-    Assert.Contains("headroom_lots 0.07", decision.SizingLog);
+    Assert.Contains("headroom_lots 0.02", decision.SizingLog);
   }
 
   [Fact]
@@ -67,10 +67,10 @@ public sealed class ScaleInPlannerTests
   public void RiskFreeModeWaitsForEnoughBookedProfit()
   {
     var open = new[] {
-      new TrancheExposure(TradeDirection.Buy, 4000m, 4000.3m, 1_300),
+      new TrancheExposure(TradeDirection.Buy, 4000m, 4000.3m, 200),
     };
-    var refused = Plan(8m, 18m, open, requireRiskFree: true);
-    var allowed = Plan(9m, 18m, open, requireRiskFree: true);
+    var refused = Plan(19m, 18m, open, requireRiskFree: true);
+    var allowed = Plan(20m, 18m, open, requireRiskFree: true);
 
     Assert.False(refused.Allowed);
     Assert.Contains("risk-free mode", refused.Reason);
@@ -79,8 +79,8 @@ public sealed class ScaleInPlannerTests
   }
 
   [Theory]
-  [InlineData(200, 300, 3)]
-  [InlineData(300, 200, 2)]
+  [InlineData(200, 400, 4)]
+  [InlineData(300, 300, 3)]
   public void SelectsFallbackLadderForAvailableSteps(
     long openVolume,
     long expectedAddVolume,
@@ -88,7 +88,7 @@ public sealed class ScaleInPlannerTests
   )
   {
     var decision = ScaleInPlanner.Plan(
-      balance: 500m,
+      balance: 900m,
       riskPercent: 2m,
       pipValuePerLot: 10m,
       addRiskFraction: 0.5m,
@@ -111,13 +111,13 @@ public sealed class ScaleInPlannerTests
   public void OneStepAddIsRefusedAsLadderInfeasible()
   {
     var decision = ScaleInPlanner.Plan(
-      balance: 500m,
+      balance: 900m,
       riskPercent: 2m,
       pipValuePerLot: 10m,
       addRiskFraction: 0.5m,
       addStopPips: 15m,
       bookedPnl: 20m,
-      openTranches: [new(TradeDirection.Buy, 4000m, 4000.3m, 400)],
+      openTranches: [new(TradeDirection.Buy, 4000m, 4000.3m, 500)],
       requireRiskFree: false,
       pipSize: 0.1m,
       Symbol,
@@ -145,7 +145,7 @@ public sealed class ScaleInPlannerTests
       addStopPips: 18m,
       open: [new(TradeDirection.Buy, 4000m, 4000.3m, 1_300)]
     );
-    Assert.Equal(0.07m, decision.HeadroomLots);
+    Assert.Equal(0.02m, decision.HeadroomLots);
   }
 
   [Fact]
