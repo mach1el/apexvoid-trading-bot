@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -293,6 +294,65 @@ async def test_bad_reply_target_retries_once_standalone():
   )
 
   assert [call["reply_to"] for call in calls] == [8123, None]
+
+
+@pytest.mark.asyncio
+async def test_owner_delivery_failure_keeps_cursor_for_replay():
+  client = redis_state.get_client()
+  await client.set(delivery._CURSOR_KEY, "100-0")
+  entries = [("101-0", {"payload": json.dumps(_opened_event())})]
+  calls = []
+
+  async def failed_send(text, **kwargs):
+    calls.append("failed")
+    raise TelegramBadRequest(
+      method=None,
+      message="Bad Request: owner temporarily unavailable",
+    )
+
+  with pytest.raises(TelegramBadRequest, match="temporarily unavailable"):
+    await delivery._process_owner_entries(
+      client,
+      entries,
+      cursor="100-0",
+      chat_id=123,
+      send=failed_send,
+    )
+
+  assert await client.get(delivery._CURSOR_KEY) == "100-0"
+
+  async def replayed_send(text, **kwargs):
+    calls.append("replayed")
+    return SimpleNamespace(message_id=9123)
+
+  cursor = await delivery._process_owner_entries(
+    client,
+    entries,
+    cursor="100-0",
+    chat_id=123,
+    send=replayed_send,
+  )
+
+  assert cursor == "101-0"
+  assert await client.get(delivery._CURSOR_KEY) == "101-0"
+  assert calls == ["failed", "replayed"]
+
+
+@pytest.mark.asyncio
+async def test_auto_trade_loop_only_starts_owner_delivery(monkeypatch):
+  calls = []
+
+  async def owner_loop(*, chat_id):
+    calls.append(chat_id)
+
+  monkeypatch.setattr(delivery.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(delivery.settings, "telegram_owner_id", 123)
+  monkeypatch.setattr(delivery.settings, "signal_public_channel_id", -100456)
+  monkeypatch.setattr(delivery, "_auto_trade_owner_events_loop", owner_loop)
+
+  await delivery.auto_trade_events_loop()
+
+  assert calls == [123]
 
 
 @pytest.mark.asyncio
