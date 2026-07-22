@@ -502,3 +502,31 @@ async def test_pause_resume_and_status(monkeypatch):
   assert "auto trader" not in text.lower()
   await delivery.set_auto_trade_paused(False)
   assert await client.get("auto_trade:paused") is None
+
+
+@pytest.mark.asyncio
+async def test_status_identifies_market_map_forming_gate(monkeypatch):
+  monkeypatch.setattr(delivery.settings, "auto_trade_enabled", True)
+  client = redis_state.get_client()
+  await client.set(
+    "auto_trade:last_gate",
+    json.dumps({
+      "state": "forming_waiting_m1",
+      "gate_source": "market_map_forming",
+      "forming_setup": {
+        "direction": "SELL",
+        "source_tf": "M5",
+        "m5_confirmation": "sweep_reclaim",
+      },
+      "box": {"low": 4113.0, "high": 4122.0},
+      "reasons": ["waiting for M1 rejection at 4,121.80-4,122.20"],
+    }),
+  )
+
+  text = await delivery.auto_trade_status_text()
+
+  assert "Market Map + forming + M1" in text
+  assert "SELL M5" in text
+  assert "sweep reclaim" in text
+  assert "forming_waiting_m1" in text
+  assert "Why: waiting for M1 rejection" in text
