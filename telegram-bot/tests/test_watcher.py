@@ -1,6 +1,7 @@
+import json
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -629,3 +630,108 @@ def test_card_and_watcher_share_conservative_entry_property():
       for tp in tps:
         expected = round(abs(tp - reference) / pip_for("XAU"))
         assert pips_between(sig, tp) == expected
+
+
+async def _seed_ctrader_bar(
+  ts: datetime, o: float, h: float, l: float, c: float
+) -> None:
+  client = redis_state.get_client()
+  score = ts.timestamp()
+  await client.zadd(
+    "bars:XAU:M1",
+    {json.dumps({"t": score, "o": o, "h": h, "l": l, "c": c, "v": 1}): score},
+  )
+
+
+def test_iso_ms_matches_tiingo_cursor_format():
+  # Both sources must render the exact same fixed-precision shape, or a bar
+  # from one source can sort incorrectly against a cursor set by the other
+  # under the watcher's plain string ">" comparison.
+  ts = datetime(2026, 7, 21, 10, 1, 0, tzinfo=timezone.utc)
+  assert watcher._iso_ms(ts) == "2026-07-21T10:01:00.000Z"
+  earlier_tiingo = "2026-07-21T10:00:00.000Z"
+  later_ctrader = watcher._iso_ms(ts)
+  assert later_ctrader > earlier_tiingo
+  assert not (earlier_tiingo > later_ctrader)
+
+
+@pytest.mark.asyncio
+async def test_load_bars_prefers_fresh_ctrader_feed_over_tiingo(monkeypatch):
+  now = datetime.now(timezone.utc)
+  await _seed_ctrader_bar(now, 2005, 2010, 2004, 2008)
+  tiingo = AsyncMock(side_effect=AssertionError("Tiingo should not be called"))
+  monkeypatch.setattr(watcher, "get_xau_bars", tiingo)
+
+  bars = await watcher._load_bars(object())
+
+  assert bars is not None
+  assert bars[-1]["close"] == pytest.approx(2008.0)
+  tiingo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_bars_falls_back_to_tiingo_when_ctrader_stale(monkeypatch):
+  stale = datetime.now(timezone.utc) - timedelta(
+    seconds=watcher.settings.watcher_ctrader_stale_seconds + 60
+  )
+  await _seed_ctrader_bar(stale, 2000, 2001, 1999, 2000)
+  fresh_tiingo = [_bar("2026-07-08T10:00:00.000Z", 2005, 2010, 2004, 2009)]
+  tiingo = AsyncMock(return_value=fresh_tiingo)
+  monkeypatch.setattr(watcher, "get_xau_bars", tiingo)
+
+  bars = await watcher._load_bars(object())
+
+  tiingo.assert_awaited_once()
+  assert bars == fresh_tiingo
+
+
+@pytest.mark.asyncio
+async def test_load_bars_falls_back_to_tiingo_when_ctrader_empty(monkeypatch):
+  fresh_tiingo = [_bar("2026-07-08T10:00:00.000Z", 2005, 2010, 2004, 2009)]
+  tiingo = AsyncMock(return_value=fresh_tiingo)
+  monkeypatch.setattr(watcher, "get_xau_bars", tiingo)
+
+  bars = await watcher._load_bars(object())
+
+  tiingo.assert_awaited_once()
+  assert bars == fresh_tiingo
+
+
+@pytest.mark.asyncio
+async def test_load_bars_falls_through_to_tiingo_call_without_key(monkeypatch):
+  # No TIINGO_API_KEY in the test env either way -- this proves the watcher
+  # still attempts the fallback (get_xau_bars handles a missing key itself,
+  # same as it always has) rather than silently giving up on a stale feed.
+  monkeypatch.setattr(watcher.settings, "tiingo_api_key", None)
+  stale = datetime.now(timezone.utc) - timedelta(
+    seconds=watcher.settings.watcher_ctrader_stale_seconds + 60
+  )
+  await _seed_ctrader_bar(stale, 2000, 2001, 1999, 2000)
+  tiingo = AsyncMock(return_value=None)
+  monkeypatch.setattr(watcher, "get_xau_bars", tiingo)
+
+  bars = await watcher._load_bars(object())
+
+  tiingo.assert_awaited_once()
+  assert bars is None
+
+
+@pytest.mark.asyncio
+async def test_watcher_tick_alerts_from_ctrader_feed_end_to_end(monkeypatch):
+  monkeypatch.setattr(
+    watcher, "get_open_signals", AsyncMock(return_value=[_buy_signal()])
+  )
+  tiingo = AsyncMock(side_effect=AssertionError("Tiingo should not be called"))
+  monkeypatch.setattr(watcher, "get_xau_bars", tiingo)
+  fanout = AsyncMock()
+  monkeypatch.setattr(watcher, "fanout_update", fanout)
+  await redis_state.set_cursor("XAU", "2000-01-01T00:00:00.000Z")
+
+  now = datetime.now(timezone.utc)
+  # High pierces TP1 (2010) for the buy fixture defined at the top of file.
+  await _seed_ctrader_bar(now, 2005, 2010, 2004, 2008)
+
+  await watcher._watcher_tick(object())
+
+  fanout.assert_awaited_once()
+  tiingo.assert_not_awaited()
