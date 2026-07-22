@@ -637,6 +637,7 @@ def test_range_edge_scalp_fires_both_directions_with_range_htf_bias(df, directio
   assert result.setup == "Range Edge Scalp"
   assert result.direction == direction
   assert result.mode == "range_scalp"
+  assert result.confirmation in detectors.RANGE_CONFIRMATION_LABELS
   assert any(reason.startswith("TP1 EQ") for reason in result.reasons)
   assert any(reason.startswith("TP2 edge") for reason in result.reasons)
 

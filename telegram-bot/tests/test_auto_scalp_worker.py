@@ -10,6 +10,14 @@ from app.autotrade import worker
 from app.persistence import redis_state
 from app.analysis import scanner
 from app.autotrade.gate import AutoScalpBox, AutoScalpDecision, AutoScalpRail
+from app.autotrade.forming_gate import (
+  FORMING_GATE_VERSION,
+  FormingRail,
+  FormingRangeSetup,
+  forming_gate_key,
+  forming_range_id,
+  forming_setup_id,
+)
 from app.autotrade.scale_context import AutoScaleContext
 from app.autotrade.trend import RegimeInfo, TrendDecision
 from app.analysis.types import Zone
@@ -73,6 +81,32 @@ def _scale_context(now: int) -> AutoScaleContext:
     bos_direction="up",
     bos_ts=now - 60,
     opposing_level_distance_atr=2.5,
+  )
+
+
+def _forming_setup(now: int) -> FormingRangeSetup:
+  return FormingRangeSetup(
+    FORMING_GATE_VERSION,
+    forming_setup_id("XAU", "M5", str(now), "BUY", 4016.8, 4025.1),
+    forming_range_id("XAU", 4016.8, 4025.1),
+    "XAU",
+    "M5",
+    str(now),
+    now,
+    now + 420,
+    "Range Edge Scalp",
+    "range_scalp",
+    "BUY",
+    "sweep_reclaim",
+    4016.8,
+    4016.5,
+    4017.1,
+    3,
+    ("local range", "wick rejection"),
+    FormingRail("BUY", 4016.5, 4017.1, 4016.8, 9.0, ("micro ×4",)),
+    FormingRail("SELL", 4024.8, 4025.4, 4025.1, 9.0, ("micro ×4",)),
+    "range",
+    "M30",
   )
 
 
@@ -165,6 +199,74 @@ async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
   assert status["rail"]["timeframes"] == ["M5", "M15"]
   assert status["box"]["id"] == "xau-8034-8050"
   assert status["full_tp_pips"] == 70
+
+
+@pytest.mark.asyncio
+async def test_worker_routes_typed_forming_setup_without_importing_scanner(
+  monkeypatch,
+):
+  client = redis_state.get_client()
+  now = int(datetime.now(timezone.utc).timestamp())
+  setup = _forming_setup(now)
+  await client.set(forming_gate_key("XAU"), setup.to_json(), ex=420)
+  monkeypatch.setattr(worker.settings, "auto_trade_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_forming_gate_enabled", True)
+  monkeypatch.setattr(worker.settings, "auto_trade_forming_m1_confirmation_bars", 5)
+  monkeypatch.setattr(worker.settings, "auto_trade_stream", "auto_trade:test")
+  monkeypatch.setattr(worker.settings, "auto_trade_stream_maxlen", 100)
+  monkeypatch.setattr(worker.settings, "auto_trade_candidate_ttl", 3600)
+  monkeypatch.setattr(worker.settings, "auto_trade_min_confluence", 2)
+  monkeypatch.setattr(worker, "event_in_window", AsyncMock(return_value=None))
+  source = AsyncMock()
+  source.window = AsyncMock(return_value=_frame())
+  monkeypatch.setattr(
+    worker,
+    "_load_spot",
+    AsyncMock(return_value=worker.AutoTradeSpot(4017.2, now, True)),
+  )
+  monkeypatch.setattr(
+    worker,
+    "evaluate_auto_scalp_gate",
+    lambda *args, **kwargs: AutoScalpDecision("waiting_for_box"),
+  )
+  monkeypatch.setattr(
+    worker,
+    "evaluate_forming_range_gate",
+    lambda *args, **kwargs: _decision(),
+  )
+  monkeypatch.setattr(
+    worker,
+    "build_auto_scale_context",
+    lambda *args, **kwargs: _scale_context(now),
+  )
+  monkeypatch.setattr(
+    worker,
+    "classify_regime",
+    lambda *args, **kwargs: RegimeInfo(
+      "trend", "up", 3, 1.2, True, None, ("private label disagrees",),
+    ),
+  )
+  trend_publish = AsyncMock()
+  monkeypatch.setattr(worker, "_publish_trend_candidate", trend_publish)
+
+  result = await worker._handle_event(
+    f"XAU:M1:{now}", source=source, client=client,
+  )
+
+  assert result == _decision()
+  trend_publish.assert_not_awaited()
+  entries = await client.xrange("auto_trade:test")
+  assert len(entries) == 1
+  candidate = json.loads(entries[0][1]["payload"])
+  assert candidate["signal_source"] == "market_map_forming"
+  assert candidate["source_setup_id"] == setup.setup_id
+  assert candidate["source_event_ts"] == setup.event_ts
+  assert candidate["source_m5_confirmation"] == "sweep_reclaim"
+  status = json.loads(await client.get("auto_trade:last_gate:XAU"))
+  assert status["state"] == "candidate"
+  assert status["gate_source"] == "market_map_forming"
+  assert status["forming_setup"]["id"] == setup.setup_id
+  assert status["forming_setup"]["m5_confirmation"] == "sweep_reclaim"
 
 
 @pytest.mark.asyncio
@@ -361,7 +463,7 @@ async def test_trend_regime_blocks_box_publish_and_only_trend_path_fires(
   assert status["direction"] == "BUY"
 
 
-def test_worker_source_has_no_forming_scanner_market_map_or_telegram_import():
+def test_worker_source_has_no_direct_scanner_market_map_or_telegram_import():
   source = inspect.getsource(worker)
   forbidden = (
     "from app.analysis.scanner",
