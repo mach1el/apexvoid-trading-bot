@@ -6,13 +6,17 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import json
+
 from app.analysis.market_map import (
   MapEntry,
   MarketMap,
   ScalpRail,
+  _distance,
   _merge_display_entries,
   build_map,
   map_materially_changed,
+  map_reference,
   market_map_from_payload,
   market_map_payload,
   render_market_map,
@@ -21,6 +25,7 @@ from app.analysis.types import DealingRange, Level, SessionLevel, Zone
 from app.analysis.regime import BoxBreak
 from app.analysis.scalp_ranges import ScalpBarrier, ScalpRange
 from app.analysis.trendlines import Trendline
+from app.analysis.zones import reconcile_opposing
 
 
 def _cfg(**overrides):
@@ -313,6 +318,125 @@ def test_render_payload_and_material_change_are_deterministic():
   )
   assert not map_materially_changed(market_map, moved_small, 1.0)
   assert map_materially_changed(market_map, moved_large, 1.0)
+
+
+def test_build_map_flags_and_tags_zone_containing_price():
+  zones = [Zone(4039.5, 4042.5, "demand", source="supply_demand", score=9)]
+
+  market_map = build_map(_ctx({"M5": _item(zones)}), 4041, _cfg())
+
+  entry = next(e for e in market_map.buys if "price inside" in e.tags)
+  assert entry.contains_price is True
+  assert (entry.lo, entry.hi) == (4039.5, 4042.5)
+
+
+def test_build_map_does_not_flag_zone_price_has_not_reached():
+  zones = [Zone(4025.31, 4027.8, "demand", source="order_block", score=9)]
+
+  market_map = build_map(_ctx({"M5": _item(zones)}), 4041, _cfg())
+
+  entry = next(e for e in market_map.buys if e.lo == 4025.31)
+  assert entry.contains_price is False
+  assert "price inside" not in entry.tags
+
+
+def test_distance_returns_far_edge_for_containing_zone():
+  entry = MapEntry("buy", 4112.0, 4116.57, 4112, 4117, "zone", [], 8.0, contains_price=True)
+
+  assert _distance(entry, 4112.0) == pytest.approx(4.57)
+
+
+def test_map_reference_skips_zone_containing_price():
+  ahead = MapEntry("buy", 4038.0, 4040.0, 4038, 4040, "zone", ["OB"], 9.0)
+  containing = MapEntry(
+    "buy", 4039.0, 4044.0, 4039, 4044, "zone", ["OB"], 20.0, contains_price=True,
+  )
+  market_map = MarketMap([ahead, containing], 4041, None, None, None, "down", None)
+
+  result = map_reference(market_map, "BUY", 4038, 4041)
+
+  assert result is not None
+  assert "4,038" in result
+
+
+def test_market_map_payload_round_trips_contains_price():
+  entry = MapEntry(
+    "buy", 4038.0, 4044.0, 4038, 4044, "zone", ["price inside"], 9.0, contains_price=True,
+  )
+  market_map = MarketMap([entry], 4041, 4047, 4032, 4062, "down", "M30")
+
+  restored = market_map_from_payload(market_map_payload(market_map))
+
+  assert restored == market_map
+  assert restored.entries[0].contains_price is True
+
+
+def test_market_map_from_payload_defaults_contains_price_for_old_shaped_payload():
+  old_payload = json.dumps({
+    "price": 4041,
+    "eq": None,
+    "box_low": None,
+    "box_high": None,
+    "bias": "down",
+    "bias_tf": None,
+    "entries": [
+      {
+        "side": "buy",
+        "lo": 4038.0,
+        "hi": 4044.0,
+        "label_lo": 4038,
+        "label_hi": 4044,
+        "tier": "zone",
+        "tags": ["OB"],
+        "score": 9.0,
+      },
+    ],
+    "rails": [],
+  })
+
+  restored = market_map_from_payload(old_payload)
+
+  assert restored.entries[0].contains_price is False
+
+
+def test_render_market_map_shows_price_inside_tag():
+  entry = MapEntry(
+    "buy", 4038.0, 4044.0, 4038, 4044, "zone", ["price inside"], 9.0, contains_price=True,
+  )
+  market_map = MarketMap([entry], 4041, 4047, 4032, 4062, "down", "M30")
+
+  text = render_market_map(
+    market_map, "XAU", datetime(2026, 7, 23, 9, 0, tzinfo=timezone.utc), _cfg(),
+  )
+
+  assert "price inside" in text
+
+
+def test_incident_0900_reconciled_zones_render_without_overlapping_bands():
+  # 23 Jul 2026 09:00 incident: published SELL 4,116-4,127 and BUY
+  # 4,112-4,122 overlapped 4,116-4,122, with price sitting inside both.
+  supply = Zone(4116, 4127, "supply", source="supply_demand", score=8.0, origin_index=1)
+  demand = Zone(4112, 4122, "demand", source="supply_demand", score=7.0, origin_index=2)
+  zones = reconcile_opposing([supply, demand], min_width=2.0)
+
+  market_map = build_map(_ctx({"M5": _item(zones)}), 4117, _cfg())
+
+  buy = next(e for e in market_map.buys if e.tier != "level")
+  sell = next(e for e in market_map.sells if e.tier != "level")
+  assert min(buy.hi, sell.hi) <= max(buy.lo, sell.lo)
+
+
+def test_incident_1100_zone_containing_price_is_tagged_and_excluded_from_reference():
+  zones = reconcile_opposing(
+    [Zone(4114, 4118, "demand", source="supply_demand", score=9.0, origin_index=1)],
+    min_width=2.0,
+  )
+
+  market_map = build_map(_ctx({"M5": _item(zones)}), 4116, _cfg())
+
+  entry = next(e for e in market_map.buys if "price inside" in e.tags)
+  assert entry.contains_price is True
+  assert map_reference(market_map, "BUY", entry.lo, entry.hi) is None
 
 
 def test_legacy_scalp_arrows_restore_as_actions():
