@@ -19,10 +19,12 @@ from app.analysis.session_liquidity import previous_week_levels, session_levels
 from app.analysis.structure import market_structure, structure_breaks
 from app.analysis.swings import find_swings
 from app.analysis.zones import (
+  ZONE_RECONCILED_TAG_PREFIX,
   breaker_blocks,
   mark_mitigation,
   merge_zones,
   order_blocks,
+  reconcile_opposing,
   score_zones,
 )
 
@@ -195,6 +197,106 @@ def test_merge_zones_keeps_chain_separate_when_band_would_exceed_cap():
 
   assert len([zone for zone in merged if zone.side == "demand"]) == 2
   assert max(zone.high - zone.low for zone in merged) <= 6
+
+
+def test_reconcile_opposing_trims_lower_scored_demand_side():
+  # 23 Jul 2026 incident numbers: published SELL 4,116-4,127 (score 8) and
+  # BUY 4,112-4,122 (score 5) overlapped 4,116-4,122.
+  supply = Zone(4116, 4127, "supply", origin_index=1, score=8.0)
+  demand = Zone(4112, 4122, "demand", origin_index=2, score=5.0)
+
+  result = reconcile_opposing([supply, demand], min_width=2.0)
+
+  result_supply = next(zone for zone in result if zone.side == "supply")
+  result_demand = next(zone for zone in result if zone.side == "demand")
+  assert (result_supply.low, result_supply.high) == (4116, 4127)
+  assert (result_demand.low, result_demand.high) == (4112, 4116)
+  assert any(
+    tag.startswith(ZONE_RECONCILED_TAG_PREFIX) for tag in result_demand.score_reasons
+  )
+  assert not any(
+    tag.startswith(ZONE_RECONCILED_TAG_PREFIX) for tag in result_supply.score_reasons
+  )
+
+
+def test_reconcile_opposing_trims_lower_scored_supply_side():
+  supply = Zone(4116, 4127, "supply", origin_index=1, score=5.0)
+  demand = Zone(4112, 4122, "demand", origin_index=2, score=8.0)
+
+  result = reconcile_opposing([supply, demand], min_width=2.0)
+
+  result_supply = next(zone for zone in result if zone.side == "supply")
+  result_demand = next(zone for zone in result if zone.side == "demand")
+  assert (result_supply.low, result_supply.high) == (4122, 4127)
+  assert (result_demand.low, result_demand.high) == (4112, 4122)
+  assert any(
+    tag.startswith(ZONE_RECONCILED_TAG_PREFIX) for tag in result_supply.score_reasons
+  )
+
+
+def test_reconcile_opposing_drops_remainder_narrower_than_min_width():
+  supply = Zone(4116, 4127, "supply", origin_index=1, score=8.0)
+  demand = Zone(4114.5, 4117, "demand", origin_index=2, score=5.0)
+
+  result = reconcile_opposing([supply, demand], min_width=2.0)
+
+  assert [zone.side for zone in result] == ["supply"]
+  assert (result[0].low, result[0].high) == (4116, 4127)
+
+
+def test_reconcile_opposing_split_keeps_larger_remainder_only():
+  # keep (supply) sits strictly inside trim (demand) - splitting would
+  # produce two disjoint demand fragments; only the larger side survives.
+  supply = Zone(4120, 4122, "supply", origin_index=1, score=10.0)
+  demand = Zone(4110, 4130, "demand", origin_index=2, score=5.0)
+
+  result = reconcile_opposing([supply, demand], min_width=2.0)
+
+  demand_zones = [zone for zone in result if zone.side == "demand"]
+  assert len(demand_zones) == 1
+  assert (demand_zones[0].low, demand_zones[0].high) == (4110, 4120)
+  supply_zones = [zone for zone in result if zone.side == "supply"]
+  assert len(supply_zones) == 1
+  assert (supply_zones[0].low, supply_zones[0].high) == (4120, 4122)
+
+
+def test_reconcile_opposing_is_deterministic_regardless_of_input_order():
+  zones = [
+    Zone(4116, 4127, "supply", origin_index=1, score=8.0),
+    Zone(4112, 4122, "demand", origin_index=2, score=5.0),
+    Zone(4200, 4210, "supply", origin_index=3, score=6.0),
+    Zone(4000, 4010, "demand", origin_index=4, score=6.0),
+  ]
+
+  first = reconcile_opposing(zones, min_width=2.0)
+  second = reconcile_opposing(list(reversed(zones)), min_width=2.0)
+
+  key = lambda zone: (zone.side, zone.low, zone.high)
+  assert sorted(first, key=key) == sorted(second, key=key)
+  # Running twice over the same (unmutated) input is also stable.
+  assert reconcile_opposing(zones, min_width=2.0) == first
+
+
+def test_reconcile_opposing_leaves_non_overlapping_zones_untouched():
+  supply = Zone(4200, 4210, "supply", origin_index=1, score=8.0)
+  demand = Zone(4000, 4010, "demand", origin_index=2, score=5.0)
+
+  result = reconcile_opposing([supply, demand], min_width=2.0)
+
+  assert supply in result
+  assert demand in result
+
+
+def test_reconcile_opposing_does_not_touch_same_side_overlaps():
+  # Same-side overlaps are merge_zones's job, which already ran before this
+  # is called - reconcile_opposing only ever compares supply against demand.
+  first = Zone(100, 104, "supply", origin_index=1, score=5.0)
+  second = Zone(102, 106, "supply", origin_index=2, score=5.0)
+
+  result = reconcile_opposing([first, second], min_width=2.0)
+
+  assert first in result
+  assert second in result
 
 
 def test_score_zones_prefers_fresh_ob_round_level_liquidity_and_htf():

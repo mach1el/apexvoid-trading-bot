@@ -16,6 +16,7 @@ from app.analysis.ohlc_source import RedisOHLCSource
 from app.signals.parsing import _parse_manual
 from app.analysis.scalp_ranges import ScalpBarrier, ScalpRange
 from app.analysis.structure import Zone
+from app.analysis.zones import ZONE_RECONCILED_TAG_PREFIX
 
 
 def _frame() -> pd.DataFrame:
@@ -383,6 +384,65 @@ async def test_scanner_caches_analysis_context_for_market_map(monkeypatch):
   assert ctx is not None
   assert set(frames) == {"M5", "M30", "M15"}
   cached.assert_called_once_with("XAU", marker, 4100.5, frames["M5"].index[-1])
+
+
+@pytest.mark.asyncio
+async def test_scanner_increments_zone_reconciled_counter(monkeypatch):
+  client = redis_state.get_client()
+  monkeypatch.setattr(scanner.settings, "scanner_symbols", "XAU")
+  monkeypatch.setattr(scanner.settings, "scanner_exec_tf", "M5")
+  monkeypatch.setattr(scanner.settings, "scanner_htf", "M30,M15")
+  monkeypatch.setattr(scanner.settings, "scanner_window", 500)
+  monkeypatch.setattr(scanner.settings, "telegram_owner_id", None)
+
+  class Source:
+    async def window(self, symbol, tf, n):
+      return _frame()
+
+  ctx = SimpleNamespace(
+    tf="M5",
+    htf_bias="up",
+    structures={"M30": SimpleNamespace(bias="up")},
+    analysis=object(),
+    spot_price=None,
+  )
+  monkeypatch.setattr(
+    scanner,
+    "build_context",
+    lambda symbol, tf, frames, settings, htf_order: ctx,
+  )
+  reconciled_map = MarketMap(
+    [
+      MapEntry(
+        "buy",
+        4112,
+        4116,
+        4112,
+        4116,
+        "zone",
+        ["demand", f"{ZONE_RECONCILED_TAG_PREFIX}supply 4116.00-4127.00"],
+        5,
+      ),
+    ],
+    4113,
+    None,
+    None,
+    None,
+    "down",
+    "M30",
+  )
+  monkeypatch.setattr(
+    scanner, "build_map", lambda analysis, price, settings: reconciled_map,
+  )
+
+  await scanner._handle_event(
+    "XAU:M5:reconciled",
+    source=Source(),
+    client=client,
+    detectors=(lambda received_ctx: None,),
+  )
+
+  assert await client.get("auto_trade:zone_reconciled:XAU") == "1"
 
 
 def test_scanner_alert_references_containing_market_map_entry():
