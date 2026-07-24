@@ -828,6 +828,43 @@ def test_worker_source_has_no_direct_scanner_market_map_or_telegram_import():
   assert all(item not in source for item in forbidden)
 
 
+def test_trend_bias_is_metadata_for_counter_direction_candidate():
+  regime = RegimeInfo(
+    "trend",
+    "up",
+    3,
+    1.3,
+    False,
+    None,
+    ("htf_bias=down", "relationship_to_bias=counter_bias"),
+  )
+
+  assert worker._trend_bias_metadata(regime, "BUY") == (
+    "bearish",
+    "counter_bias",
+  )
+
+
+def test_trend_groups_are_scoped_to_the_structural_zone():
+  first = TrendDecision(
+    "candidate",
+    direction="BUY",
+    mode="pullback",
+    entry_zone=(4010.0, 4011.0),
+    key_level=4010.5,
+  )
+  second = replace(
+    first,
+    entry_zone=(4016.0, 4017.0),
+    key_level=4016.5,
+  )
+
+  assert worker._trend_group_id("XAU", first) != worker._trend_group_id(
+    "XAU",
+    second,
+  )
+
+
 # --- A1: entry-location guard -----------------------------------------------
 
 def test_eq_exclusion_rejects_entry_near_box_midpoint_spec_example():

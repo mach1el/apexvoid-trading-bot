@@ -38,6 +38,15 @@ def test_demo_profile_resolves_execution_defaults(monkeypatch):
   assert not cfg.auto_trade_require_flat_for_range
   assert cfg.auto_trade_range_two_sided_enabled
   assert cfg.auto_trade_range_flip_enabled
+  assert cfg.auto_trade_trend_enabled
+  assert cfg.auto_trade_range_enabled
+  assert cfg.auto_trade_market_map_strategy_enabled
+  assert cfg.auto_trade_strategy_bridge_enabled
+  assert cfg.auto_trade_breakout_enabled
+  assert cfg.auto_trade_retest_enabled
+  assert cfg.auto_trade_reaction_enabled
+  assert cfg.auto_trade_liquidity_reversal_enabled
+  assert cfg.auto_trade_allow_counter_bias
   assert cfg.auto_trade_multi_match_enabled
   assert cfg.auto_trade_track_all_structural_matches
   assert cfg.scanner_top_n == 0
@@ -249,3 +258,27 @@ def test_config_health_detects_fatal_contract_mismatch():
   health = compare_manifests(python, ctrader)
   assert health["state"] == "fatal"
   assert "pip_size" in health["fatal"]
+
+
+def test_config_health_detects_dry_run_split_brain():
+  python = {
+    "auto_trade_enabled": True,
+    "dry_run": True,
+    "manual_algo_enabled": True,
+    "manual_algo_dry_run": True,
+    "candidate_stream": "auto_trade:candidates",
+    "event_stream": "auto_trade:events",
+    "redis_database": 0,
+    "redis_fingerprint": "same",
+    "canonical_symbol": "XAU",
+    "pip_size": 0.1,
+    "candidate_contract_version": 4,
+    "target_plans": [30, 60],
+    "range_target_plans": [20, 30],
+  }
+  ctrader = {**python, "dry_run": False, "manual_algo_dry_run": False}
+
+  health = compare_manifests(python, ctrader)
+
+  assert health["state"] == "fatal"
+  assert set(health["fatal"]) >= {"dry_run", "manual_algo_dry_run"}

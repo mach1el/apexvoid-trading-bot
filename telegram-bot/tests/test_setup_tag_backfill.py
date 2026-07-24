@@ -260,13 +260,15 @@ async def test_algo_suffix_arms_and_publishes_intent_when_enabled(monkeypatch):
 
   text = msg.answer.await_args.args[0]
   assert "✅ Sent to channel (#1)" in text
-  assert "🤖 Algo armed (dry-run)" in text
+  assert "📨 ALGO REQUEST RECEIVED" in text
+  assert "Waiting for executor confirmation" in text
+  assert "dry-run" not in text
 
   set_intent.assert_awaited_once()
   assert set_intent.await_args.args == (47,)
   assert set_intent.await_args.kwargs == {
     "intent_id": "manual:47:0",
-    "status": "armed",
+    "status": "requested",
     "revision": 0,
   }
 
@@ -300,8 +302,27 @@ async def test_algo_suffix_not_live_still_reports_dry_run_off(monkeypatch):
   await wiring.handle_private_signal(msg)
 
   text = msg.answer.await_args.args[0]
-  assert "🤖 Algo armed" in text
+  assert "📨 ALGO REQUEST RECEIVED" in text
+  assert "Waiting for executor confirmation" in text
   assert "dry-run" not in text
+
+
+@pytest.mark.asyncio
+async def test_algo_request_is_blocked_when_config_health_is_fatal(monkeypatch):
+  monkeypatch.setattr(wiring.settings, "manual_algo_enabled", True)
+  set_intent = AsyncMock()
+  monkeypatch.setattr(wiring._fallback, "set_execution_intent", set_intent)
+  client = redis_state.get_client()
+  await client.set(
+    "auto_trade:config_health",
+    json.dumps({"state": "fatal", "fatal": ["dry_run"]}),
+  )
+
+  note = await wiring._fallback._arm_algo_intent(47, {})
+
+  assert "CONFIG_HEALTH=FATAL" in note
+  assert "dry_run" in note
+  set_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio

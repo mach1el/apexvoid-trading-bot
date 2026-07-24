@@ -226,17 +226,19 @@ def _match(
 
 def test_multi_match_dedupe_and_storage():
   a = _match("Trend Pullback", "BUY", 100, 101)
+  duplicate = _match("Trend Pullback", "BUY", 100, 101, confluence=2)
   b = _match("Break & Retest", "BUY", 100.1, 101.1)
   c = _match("Fade Scalp", "SELL", 110, 111)
-  kept, events = dedupe_matches([a, b, c], atr=2.0)
-  assert same_thesis(a, b, atr=2.0)
-  assert len(kept) == 2
+  kept, events = dedupe_matches([a, duplicate, b, c], atr=2.0)
+  assert same_thesis(a, duplicate, atr=2.0)
+  assert not same_thesis(a, b, atr=2.0)
+  assert len(kept) == 3
   assert any(item["event"] == "merged_confluence" for item in events)
   primary = select_primary(kept)
   assert primary is not None
   raw = serialize_matches(kept)
   restored = deserialize_matches(raw)
-  assert len(restored) == 2
+  assert len(restored) == 3
 
 
 def test_multi_match_keeps_distinct_family_trigger_and_target_theses():

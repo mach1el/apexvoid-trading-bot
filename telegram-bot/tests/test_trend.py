@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 
 from app.autotrade import trend
 from app.autotrade.gate import AutoScalpBox, AutoScalpDecision, AutoScalpRail
@@ -166,6 +167,30 @@ def test_clear_uptrend_with_expanding_atr_classifies_as_trend():
   assert regime.direction == "up"
   assert regime.bos_count >= settings.trend_min_bos
   assert regime.htf_aligned is True
+
+
+def test_demo_eval_keeps_counter_bias_local_trend_executable(monkeypatch):
+  monkeypatch.setattr(
+    trend,
+    "analyze",
+    lambda *_args, **_kwargs: SimpleNamespace(htf_bias="down"),
+  )
+  monkeypatch.setattr(settings, "auto_trade_allow_counter_bias", True)
+  frames = {
+    "M1": _uptrend_m1(),
+    "M15": _flat_frame(20, "15min"),
+  }
+
+  regime = trend.classify_regime(
+    frames,
+    AutoScalpDecision("waiting_for_box"),
+    settings,
+  )
+
+  assert regime.state == "trend"
+  assert regime.direction == "up"
+  assert regime.htf_aligned is False
+  assert "relationship_to_bias=counter_bias" in regime.reasons
 
 
 def test_same_shape_with_flat_atr_does_not_classify_as_trend(monkeypatch):

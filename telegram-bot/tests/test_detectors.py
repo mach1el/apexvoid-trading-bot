@@ -353,6 +353,39 @@ def test_confirmation_rejection_is_required():
   assert detectors.trend_pullback(confirmed) is not None
 
 
+def test_trend_pullback_keeps_counter_bias_local_structure_executable():
+  ctx = _ctx(
+    _buy_rejection_df(),
+    zones=[
+      Zone(
+        103,
+        105,
+        "demand",
+        source="order_block",
+        score=detectors.STAR_TWO_SCORE,
+      ),
+    ],
+  )
+  ctx = replace(ctx, htf_bias="down")
+
+  result = detectors.trend_pullback(ctx)
+
+  assert result is not None
+  assert result.direction == "BUY"
+  assert "counter_bias" in result.reasons
+
+
+def test_trend_pullback_can_still_require_htf_alignment_when_configured():
+  ctx = _trend_pullback_ctx()
+  ctx = replace(
+    ctx,
+    htf_bias="down",
+    settings=replace(ctx.settings, allow_counter_trend=False),
+  )
+
+  assert detectors.trend_pullback(ctx) is None
+
+
 def test_trend_pullback_prefers_best_scored_zone_over_nearest_zone():
   df = _buy_rejection_df()
   ctx = _ctx(
@@ -524,6 +557,10 @@ def test_named_setup_returns_none_when_counter_htf_bias(
   _setup,
 ):
   ctx = replace(ctx_factory(), htf_bias="down")
+  ctx = replace(
+    ctx,
+    settings=replace(ctx.settings, allow_counter_trend=False),
+  )
 
   assert detector(ctx) is None
 

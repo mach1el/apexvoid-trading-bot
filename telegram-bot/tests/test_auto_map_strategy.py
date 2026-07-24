@@ -395,7 +395,7 @@ def test_worked_counter_bias_zone_produces_tagged_eq_capped_match(monkeypatch):
     (["demand", "fresh"], 6.5),
   ],
 )
-def test_counter_bias_rejects_missing_fresh_low_score_or_confluence(
+def test_counter_bias_uses_same_structural_zone_rules_as_aligned_entries(
   tags,
   score,
 ):
@@ -412,9 +412,9 @@ def test_counter_bias_rejects_missing_fresh_low_score_or_confluence(
     _cfg(auto_trade_map_counter_bias_enabled=True),
   )
 
-  assert selected is None
-  assert state == "waiting_for_touch"
-  assert "actionable=1" in reasons[0]
+  assert selected is not None
+  assert selected[1] == "BUY"
+  assert state == "candidate"
 
 
 def test_nearby_trendline_level_satisfies_counter_bias_confluence():
