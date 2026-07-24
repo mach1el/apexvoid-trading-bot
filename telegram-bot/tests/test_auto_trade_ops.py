@@ -724,6 +724,42 @@ async def test_pause_resume_and_status(monkeypatch):
     '"selected_timeframe":"M1","direction":"BUY",'
     '"box":{"low":4016.5,"high":4024.5},"full_tp_pips":70}',
   )
+  await client.set(
+    "auto_trade:last_guard:XAU",
+    json.dumps({
+      "strategy": "Demand Zone Reaction",
+      "direction": "BUY",
+      "guard": "counter_bias",
+      "outcome": "adjust_target",
+      "reason": "target_capped_by_structure",
+      "hard_block": False,
+      "source_structure": "market_map_zone",
+      "opposing_structure": {
+        "side": "resistance",
+        "low": 4058.8,
+        "high": 4059.2,
+      },
+      "measured": {
+        "available_room_pips": 23,
+        "effective_pips": 10,
+        "original_target": 4060,
+        "adjusted_target": 4058.5,
+        "barrier_price": 4058.8,
+      },
+      "updated_at": 1784900000,
+    }),
+  )
+  await client.hset(
+    "auto_trade:zone_reconcile:XAU",
+    mapping={
+      "mode": "shadow",
+      "zones_input": 6,
+      "zones_shadow_output": 4,
+      "zones_trimmed": 1,
+      "zones_dropped": 1,
+      "candidate_difference_count": 2,
+    },
+  )
   assert await client.get("auto_trade:paused") == "1"
   text = await delivery.auto_trade_status_text()
   assert "demo trading" in text
@@ -736,6 +772,14 @@ async def test_pause_resume_and_status(monkeypatch):
   assert "Execution: <b>waiting rejection</b>" in text
   assert "box 4,016.50–4,024.50" in text
   assert "full TP 70p" in text
+  assert "Demand Zone Reaction · BUY · counter_bias · adjust_target" in text
+  assert "target_capped_by_structure" in text
+  assert "hard block=False" in text
+  assert "source=market_map_zone" in text
+  assert "opposing resistance 4058.8-4059.2" in text
+  assert "target 4060→4058.5" in text
+  assert "mode=shadow" in text
+  assert "candidate_difference_count=2" in text
   assert "auto trader" not in text.lower()
   await delivery.set_auto_trade_paused(False)
   assert await client.get("auto_trade:paused") is None
