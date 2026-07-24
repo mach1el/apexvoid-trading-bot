@@ -113,7 +113,7 @@ public sealed class AutoTradeEngineTests
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       timeframe: "M5"
     ))
     {
@@ -138,15 +138,15 @@ public sealed class AutoTradeEngineTests
     Assert.True(order.Volume > 0);
     Assert.Equal(101, store.DailyTradeCount);
     Assert.Empty(client.LimitOrders);
-    Assert.Contains($"|{order.Volume}|70|1|", order.Comment);
+    Assert.Contains($"|{order.Volume}|50|1|", order.Comment);
     var opened = Assert.Single(store.Events, item => item.Type == "opened");
     Assert.Equal("algo_auto", opened.Stream);
     Assert.Equal("BUY", opened.Direction);
-    Assert.Contains("full TP 70p", opened.Message);
+    Assert.Contains("full TP 50p", opened.Message);
     Assert.Contains("range 4,000.00-4,008.00", opened.Message);
     var stopPips = order.RelativeStopLoss / 10_000m;
     Assert.Equal(stopPips, opened.StopPips);
-    Assert.Equal(new[] { 70 }, opened.TargetsPips);
+    Assert.Equal(new[] { 50 }, opened.TargetsPips);
 
     await engine.ObserveSpotAsync(
       new SpotPrice("XAU", 4007.2m, 4007.4m, Now.ToUnixTimeSeconds()),
@@ -158,9 +158,9 @@ public sealed class AutoTradeEngineTests
       store.Events,
       item => item.Type == "take_profit"
     );
-    Assert.Equal(70, takeProfit.TargetPips);
+    Assert.Equal(50, takeProfit.TargetPips);
     Assert.Equal(stopPips, takeProfit.StopPips);
-    Assert.StartsWith("FULL TP +70 pips", takeProfit.Message);
+    Assert.StartsWith("FULL TP +50 pips", takeProfit.Message);
     Assert.DoesNotContain(store.Events, item => item.Type == "stop_moved");
     Assert.Empty(store.Positions);
 
@@ -172,7 +172,7 @@ public sealed class AutoTradeEngineTests
   public async Task RangeFlipTargetExitsInsideOpposingEdgeAndClearsPendingOnFill()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 70));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 50));
     var client = new FakeTradingClient();
     var engine = new AutoTradeEngine(
       Options() with { RangeFlipEnabled = true },
@@ -232,7 +232,7 @@ public sealed class AutoTradeEngineTests
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       direction: "SELL",
       structureSwing: 4009.5m
     ));
@@ -267,10 +267,65 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
+  public async Task BoxRangeScalpRejectsTargetOutsideConfiguredLadder()
+  {
+    // The executor must validate membership in AUTO_TRADE_RANGE_TARGETS_PIPS
+    // (default 30/40/50), not a hardcoded "50 or 70" expression - Python
+    // already selected this target upstream, so a value outside the shared
+    // ladder means the two sides drifted and must be rejected loudly.
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 45));
+    var client = new FakeTradingClient();
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await WaitForEventAsync(store, "rejected");
+
+    Assert.Empty(client.Orders);
+    Assert.Contains(store.Events, item =>
+      item.Type == "rejected"
+      && item.Message.Contains("invalid range-box contract")
+    );
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
+  public async Task BoxRangeScalpAcceptsNonDefaultConfiguredTarget()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 45));
+    var client = new FakeTradingClient();
+    var engine = new AutoTradeEngine(
+      Options() with { RangeTargetsPips = [45] },
+      store,
+      () => Now,
+      _ => { }
+    );
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    Assert.Single(client.Orders);
+    Assert.DoesNotContain(store.Events, item =>
+      item.Type == "rejected"
+      && item.Message.Contains("invalid range-box contract")
+    );
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
   public async Task RangeFlipTimeoutAlertsAndDoesNotBookTarget()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 70));
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 50));
     var client = new FakeTradingClient { BlockClose = true };
     var engine = new AutoTradeEngine(
       Options() with {
@@ -333,6 +388,43 @@ public sealed class AutoTradeEngineTests
       item.Type == "rejected"
       && item.Message.Contains("waits for flat XAU exposure")
     );
+    Assert.Contains(("XAU", "range_box_awaiting_flat"), store.GateRejects);
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
+  public async Task UnmanagedPositionBlocksNewCandidateAndRecordsCounter()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient();
+    client.SeedPosition(new TradingPosition(
+      91,
+      Symbol.SymbolId,
+      TradeDirection.Buy,
+      600,
+      4000.2m,
+      4000.5m,
+      "some-other-ea",
+      "manually opened, not ours"
+    ));
+    var engine = new AutoTradeEngine(Options(), store, () => Now, _ => { });
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4000.0m, 4000.2m, Now.ToUnixTimeSeconds()),
+      cts.Token
+    );
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await WaitForEventAsync(store, "rejected");
+
+    Assert.Empty(client.Orders);
+    Assert.Contains(store.Events, item =>
+      item.Type == "rejected"
+      && item.Message.Contains("unmanaged XAU position or pending order")
+    );
+    Assert.Contains(("XAU", "unmanaged_exposure"), store.GateRejects);
 
     cts.Cancel();
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -1390,7 +1482,7 @@ public sealed class AutoTradeEngineTests
     // stop below the zone's low edge by another AddStopBufferAtr * atr.
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       opposingZoneLow: 3997.0m,
       opposingZoneHigh: 3998.5m
     ));
@@ -1421,7 +1513,7 @@ public sealed class AutoTradeEngineTests
     // stop.
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       opposingZoneLow: 3990.0m,
       opposingZoneHigh: 3998.0m
     ));
@@ -1450,7 +1542,7 @@ public sealed class AutoTradeEngineTests
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       opposingZoneLow: 3997.0m,
       opposingZoneHigh: 3998.5m
     ));
@@ -1483,7 +1575,7 @@ public sealed class AutoTradeEngineTests
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       sweepLow: 3993.5m
     ));
     var client = new FakeTradingClient();
@@ -1575,7 +1667,7 @@ public sealed class AutoTradeEngineTests
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var store = new FakeAutoTradeStore(BoxCandidateJson(
-      fullTpPips: 70,
+      fullTpPips: 50,
       regime: "chop",
       confluence: 3
     ));
@@ -2041,7 +2133,7 @@ public sealed class AutoTradeEngineTests
     // an ambiguous stop-out/manual close.
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
     var now = Now;
-    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 70))
+    var store = new FakeAutoTradeStore(BoxCandidateJson(fullTpPips: 50))
     {
       DailyTradeCount = 100,
     };

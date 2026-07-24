@@ -179,6 +179,62 @@ public sealed class AutoTradeOptionsTests
     );
   }
 
+  [Fact]
+  public void RangeTargetsDefaultToSharedThirtyFortyFiftyLadder()
+  {
+    var options = AutoTradeOptions.FromEnvironment();
+
+    // Same default and env var (AUTO_TRADE_RANGE_TARGETS_PIPS) as
+    // app/autotrade/range_targets.py on the Python side - previously this
+    // executor independently hardcoded FullTakeProfitPips to exactly 50 or
+    // 70, duplicating (and able to drift from) Python's own ladder.
+    Assert.Equal(new[] { 30, 40, 50 }, options.EffectiveRangeTargetsPips);
+    Assert.Equal(5m, options.RangeTpBufferPips);
+  }
+
+  [Fact]
+  public void RangeTargetsFallBackToDefaultWhenUnset()
+  {
+    var options = Options();
+
+    Assert.Null(options.RangeTargetsPips);
+    Assert.Equal(new[] { 30, 40, 50 }, options.EffectiveRangeTargetsPips);
+  }
+
+  [Fact]
+  public void ReadsExplicitRangeTargetsFromEnvironment()
+  {
+    Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_TARGETS_PIPS", "20,35");
+    Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_TP_BUFFER_PIPS", "3");
+    try
+    {
+      var options = AutoTradeOptions.FromEnvironment();
+      Assert.Equal(new[] { 20, 35 }, options.EffectiveRangeTargetsPips);
+      Assert.Equal(3m, options.RangeTpBufferPips);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_TARGETS_PIPS", null);
+      Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_TP_BUFFER_PIPS", null);
+    }
+  }
+
+  [Fact]
+  public void ValidatesRangeTargetsAreNonEmptyPositiveWithNonNegativeBuffer()
+  {
+    Options().Validate();
+
+    Assert.Throws<AutoTradeConfigurationException>(
+      () => (Options() with { RangeTargetsPips = [] }).Validate()
+    );
+    Assert.Throws<AutoTradeConfigurationException>(
+      () => (Options() with { RangeTargetsPips = [30, -5] }).Validate()
+    );
+    Assert.Throws<AutoTradeConfigurationException>(
+      () => (Options() with { RangeTpBufferPips = -1m }).Validate()
+    );
+  }
+
   private static AutoTradeOptions Options() => new(
     Enabled: true,
     DryRun: false,

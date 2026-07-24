@@ -103,7 +103,9 @@ def test_support_rejection_creates_buy_with_full_50_pip_target(monkeypatch):
   assert decision.sweep_high is None
 
 
-def test_support_rejection_uses_70_pips_when_box_has_room(monkeypatch):
+def test_support_rejection_uses_largest_configured_target_when_box_has_room(
+  monkeypatch,
+):
   support = _rail("support", 100.0, touches=3)
   resistance = _rail("resistance", 108.3)
   monkeypatch.setattr(
@@ -127,7 +129,9 @@ def test_support_rejection_uses_70_pips_when_box_has_room(monkeypatch):
   assert decision.state == "candidate"
   assert decision.direction == "BUY"
   assert decision.target_room_pips == pytest.approx(76.0)
-  assert decision.full_tp_pips == 70
+  # Default ladder is 30/40/50 pips (AUTO_TRADE_RANGE_TARGETS_PIPS) - 76
+  # pips of room is ample, so the largest configured target (50) is chosen.
+  assert decision.full_tp_pips == 50
 
 
 def test_same_role_micro_level_does_not_block_opposite_target(monkeypatch):
@@ -156,7 +160,12 @@ def test_same_role_micro_level_does_not_block_opposite_target(monkeypatch):
   assert decision.target is resistance
 
 
-def test_target_below_50_pips_plus_buffer_is_blocked(monkeypatch):
+def test_50_pip_target_falls_through_to_40_pip_target_when_room_is_tighter(
+  monkeypatch,
+):
+  # 23 Jul incident replay: ~50 pips of room used to fall straight through
+  # the old hardcoded {50,70} ladder (50 needs 55 with the buffer) into a
+  # silent target_blocked. It must now land on the 40-pip target instead.
   support = _rail("support", 100.0, touches=3)
   resistance = _rail("resistance", 105.7)
   monkeypatch.setattr(
@@ -177,8 +186,34 @@ def test_target_below_50_pips_plus_buffer_is_blocked(monkeypatch):
     spot_price=100.55,
   )
 
-  assert decision.state == "target_blocked"
+  assert decision.state == "candidate"
   assert decision.target_room_pips == pytest.approx(50.5)
+  assert decision.full_tp_pips == 40
+
+
+def test_target_below_30_pips_plus_buffer_is_blocked(monkeypatch):
+  support = _rail("support", 100.0, touches=3)
+  resistance = _rail("resistance", 103.0)
+  monkeypatch.setattr(
+    gate,
+    "_m1_consolidation_box",
+    lambda m1, atr, symbol: _box(support, resistance),
+  )
+  frames = _frames({
+    "open": 100.25,
+    "high": 100.70,
+    "low": 99.85,
+    "close": 100.55,
+  })
+
+  decision = gate.evaluate_auto_scalp_gate(
+    frames,
+    symbol="XAU",
+    spot_price=100.55,
+  )
+
+  assert decision.state == "target_blocked"
+  assert decision.target_room_pips == pytest.approx(23.5)
   assert decision.full_tp_pips is None
 
 
@@ -206,7 +241,8 @@ def test_resistance_rejection_creates_sell(monkeypatch):
   assert decision.state == "candidate"
   assert decision.direction == "SELL"
   assert decision.target == support
-  assert decision.full_tp_pips == 70
+  # ~78 pips of room; largest of the default 30/40/50 ladder is 50.
+  assert decision.full_tp_pips == 50
   assert decision.sweep_low is None
   assert decision.sweep_high == pytest.approx(100.15)
 
@@ -369,7 +405,7 @@ def test_waiting_for_box_state_carries_reasons():
 
 def test_target_blocked_state_carries_reasons(monkeypatch):
   support = _rail("support", 100.0, touches=3)
-  resistance = _rail("resistance", 105.7)
+  resistance = _rail("resistance", 103.0)
   monkeypatch.setattr(
     gate, "_m1_consolidation_box", lambda m1, atr, symbol: _box(support, resistance),
   )

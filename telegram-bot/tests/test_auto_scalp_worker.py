@@ -64,7 +64,7 @@ def _decision() -> AutoScalpDecision:
     rail=support,
     target=resistance,
     target_room_pips=76.0,
-    full_tp_pips=70,
+    full_tp_pips=50,
     box=box,
     confluence=3,
     reasons=("M1 range rejection", "support rail"),
@@ -164,7 +164,7 @@ async def test_worker_publishes_one_durable_auto_only_candidate(monkeypatch):
   assert payload["range_id"] == "xau-8034-8050"
   assert payload["range_low"] == 4016.8
   assert payload["range_high"] == 4025.1
-  assert payload["full_take_profit_pips"] == 70
+  assert payload["full_take_profit_pips"] == 50
   assert payload["sweep_low"] == 4015.9
   assert payload["sweep_high"] is None
   assert payload["structure_swing"] == 4014.8
@@ -219,7 +219,7 @@ async def test_worker_handles_m1_without_calling_scanner(monkeypatch):
   assert status["rail"]["role"] == "support"
   assert status["rail"]["timeframes"] == ["M5", "M15"]
   assert status["box"]["id"] == "xau-8034-8050"
-  assert status["full_tp_pips"] == 70
+  assert status["full_tp_pips"] == 50
 
 
 @pytest.mark.asyncio

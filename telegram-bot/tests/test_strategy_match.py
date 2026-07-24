@@ -87,11 +87,13 @@ def _range() -> ScalpRange:
 
 
 def test_strategy_match_contract_round_trips_and_rejects_wrong_version():
-  match = scanner._build_strategy_match(
+  match, reason, measured = scanner._build_strategy_match(
     "XAU", "M5", "1784721300", _context(), [_result()], now=NOW,
   )
 
   assert match is not None
+  assert reason is None
+  assert measured == {}
   assert StrategyMatch.from_json(match.to_json()) == match
   assert StrategyMatch.from_json("not-json") is None
   assert StrategyMatch.from_json(
@@ -110,7 +112,7 @@ def test_scanner_transports_strongest_strategy_without_regime_routing(
     scanner.settings, "auto_trade_strategy_match_max_age_seconds", 420,
   )
 
-  match = scanner._build_strategy_match(
+  match, reason, measured = scanner._build_strategy_match(
     "XAU",
     "M5",
     "1784721300",
@@ -120,6 +122,7 @@ def test_scanner_transports_strongest_strategy_without_regime_routing(
   )
 
   assert match is not None
+  assert reason is None
   assert match.strategy == "Liquidity Sweep"
   assert match.strategy_mode == "with_trend"
   assert match.source_tf == "M5"
@@ -133,7 +136,7 @@ def test_scanner_transports_strongest_strategy_without_regime_routing(
 
 def test_range_edge_is_a_strategy_with_its_own_full_tp_plan(monkeypatch):
   monkeypatch.setattr(scanner.settings, "auto_trade_tp_pips", "30,60,90")
-  match = scanner._build_strategy_match(
+  match, reason, measured = scanner._build_strategy_match(
     "XAU",
     "M5",
     "1784721300",
@@ -143,12 +146,86 @@ def test_range_edge_is_a_strategy_with_its_own_full_tp_plan(monkeypatch):
   )
 
   assert match is not None
+  assert reason is None
+  # 88 pips of room to the opposite edge: largest of the default 30/40/50
+  # ladder that fits with the 5-pip buffer is 50 (55 <= 88).
   assert match.strategy == "Range Edge Scalp"
   assert match.is_range_edge
   assert match.range_low == 4113.0
   assert match.range_high == 4122.0
-  assert match.full_take_profit_pips == 70
-  assert match.targets_pips == (70,)
+  assert match.full_take_profit_pips == 50
+  assert match.targets_pips == (50,)
+
+
+def test_range_edge_selects_40_pip_target_from_40_to_49_pip_room(monkeypatch):
+  # 23 Jul incident: Telegram showed a Range Edge Scalp BUY with ~40-49
+  # pips of room, but no autonomous order ever opened. Root cause: the old
+  # hardcoded {50,70} ladder required >=55 pips of room just to reach the
+  # smallest configured target, so this room band always fell through to a
+  # silent `return None` with zero telemetry. It must now select 40.
+  lower = ScalpBarrier(
+    "support", 4113.0, 4112.8, 4113.2, 4, 3, 0, 18, ["micro ×4"], 9.0,
+  )
+  # 1 pip = 0.1 price for XAU: 4118.5 -> 4123.0 is 4.5 price = 45 pips room.
+  upper = ScalpBarrier(
+    "resistance", 4123.0, 4122.8, 4123.2, 5, 4, 0, 17, ["micro ×5"], 10.0,
+  )
+  narrow_range = ScalpRange(lower, upper, 4118.0, 10.0, 9.0)
+  result = DetectionResult(
+    "Range Edge Scalp",
+    "BUY",
+    4113.0,
+    Zone(4112.8, 4113.4, "demand", score=8.0),
+    4118.5,
+    2,
+    ["sell-side liquidity swept", "bullish reclaim"],
+    mode="range_scalp",
+    confirmation="sweep_reclaim",
+  )
+
+  match, reason, measured = scanner._build_strategy_match(
+    "XAU", "M5", "1784721300", _context(scalp_range=narrow_range), [result],
+    now=NOW,
+  )
+
+  # 45 pips of room: 50 needs 55 (too tight), 40 needs 45 (fits exactly).
+  assert match is not None
+  assert reason is None
+  assert match.full_take_profit_pips == 40
+
+
+def test_insufficient_target_room_is_rejected_with_a_reason_not_silently(
+  monkeypatch,
+):
+  lower = ScalpBarrier(
+    "support", 4113.0, 4112.8, 4113.2, 4, 3, 0, 18, ["micro ×4"], 9.0,
+  )
+  upper = ScalpBarrier(
+    "resistance", 4116.0, 4115.8, 4116.2, 5, 4, 0, 17, ["micro ×5"], 10.0,
+  )
+  # Only ~2.5 pips of room to the opposite edge -- no configured target
+  # (30/40/50 with a 5-pip buffer) can ever fit.
+  narrow_range = ScalpRange(lower, upper, 4114.5, 3.0, 9.0)
+  result = DetectionResult(
+    "Range Edge Scalp",
+    "BUY",
+    4113.0,
+    Zone(4112.8, 4113.4, "demand", score=8.0),
+    4115.75,
+    2,
+    ["sell-side liquidity swept", "bullish reclaim"],
+    mode="range_scalp",
+    confirmation="sweep_reclaim",
+  )
+
+  match, reason, measured = scanner._build_strategy_match(
+    "XAU", "M5", "1784721300", _context(scalp_range=narrow_range), [result],
+    now=NOW,
+  )
+
+  assert match is None
+  assert reason == "insufficient_target_room"
+  assert measured["room_pips"] == pytest.approx(2.5, abs=0.1)
 
 
 @pytest.mark.asyncio
