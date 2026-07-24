@@ -124,6 +124,35 @@ def test_two_resistances_zero_support_gets_fallback_or_reason():
     assert any(b.fallback for b in supports) or detailed.scalp_range is not None
 
 
+def test_missing_resistance_fallback_is_symmetric():
+  source = _resistance_only_df()
+  mirrored = source.copy()
+  for column in ("open", "high", "low", "close"):
+    mirrored[column] = 220.0 - source[column]
+  mirrored["high"], mirrored["low"] = (
+    220.0 - source["low"],
+    220.0 - source["high"],
+  )
+  atr = pd.Series([1.5] * len(mirrored), index=mirrored.index)
+  detailed = build_scalp_structure_detailed(
+    mirrored, atr, [], [], None, _cfg(),
+  )
+  supports = [b for b in detailed.barriers if b.side == "support"]
+  resistances = [b for b in detailed.barriers if b.side == "resistance"]
+  assert supports
+  if not resistances:
+    assert detailed.missing_side_reason in {
+      "no_resistance_after_fallback",
+      "range_geometry_rejected",
+      "no_resistance_clustering",
+    }
+  else:
+    assert (
+      any(barrier.fallback for barrier in resistances)
+      or detailed.scalp_range is not None
+    )
+
+
 def test_adaptive_range_targets_ladder():
   assert select_range_target(48.8, targets=(70, 50, 40, 30, 20), buffer_pips=3) == 40
   assert select_range_target(40.9, targets=(70, 50, 40, 30, 20), buffer_pips=3) == 30
@@ -156,10 +185,19 @@ def test_quality_tiers_and_risk_multipliers():
   assert risk_multiplier_for_tier("A", post_impulse=True) == 0.5
 
 
-def _match(strategy: str, direction: str, low: float, high: float, confluence: int = 3):
+def _match(
+  strategy: str,
+  direction: str,
+  low: float,
+  high: float,
+  confluence: int = 3,
+  *,
+  family: str = "",
+  event_ts: str = "100",
+  targets: tuple[int, ...] = (30,),
+):
   symbol = "XAU"
   tf = "M5"
-  event_ts = "100"
   match_id = strategy_match_id(symbol, tf, event_ts, strategy, direction, low, high)
   return StrategyMatch(
     version=STRATEGY_MATCH_VERSION,
@@ -180,8 +218,9 @@ def _match(strategy: str, direction: str, low: float, high: float, confluence: i
     reasons=(strategy,),
     atr=2.0,
     structure_swing=low if direction == "BUY" else high,
-    targets_pips=(30,),
+    targets_pips=targets,
     tier="A",
+    family=family,
   )
 
 
@@ -198,6 +237,38 @@ def test_multi_match_dedupe_and_storage():
   raw = serialize_matches(kept)
   restored = deserialize_matches(raw)
   assert len(restored) == 2
+
+
+def test_multi_match_keeps_distinct_family_trigger_and_target_theses():
+  base = _match(
+    "Trend Pullback", "BUY", 100, 101, family="trend_pullback",
+  )
+  other_family = _match(
+    "Break & Retest", "BUY", 100.1, 101.1, family="breakout_retest",
+  )
+  other_trigger = _match(
+    "Trend Pullback",
+    "BUY",
+    100.1,
+    101.1,
+    family="trend_pullback",
+    event_ts="101",
+  )
+  other_target = _match(
+    "Trend Pullback",
+    "BUY",
+    100.1,
+    101.1,
+    family="trend_pullback",
+    targets=(60,),
+  )
+
+  kept, _ = dedupe_matches(
+    [base, other_family, other_trigger, other_target],
+    atr=2.0,
+  )
+
+  assert len(kept) == 4
 
 
 def test_role_flip_creates_opposite_side_barrier():
