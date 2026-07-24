@@ -180,6 +180,58 @@ public sealed class AutoTradeOptionsTests
   }
 
   [Fact]
+  public void DemoEvalProfileResolvesPermissiveExecutionDefaults()
+  {
+    Environment.SetEnvironmentVariable("AUTO_TRADE_PROFILE", "demo_eval");
+    try
+    {
+      var options = AutoTradeOptions.FromEnvironment();
+
+      Assert.Equal("demo_eval", options.Profile);
+      Assert.True(options.RequireDemoAccount);
+      Assert.True(options.AllowConcurrentStrategies);
+      Assert.True(options.AllowHedgedXau);
+      Assert.False(options.RequireFlatForRange);
+      Assert.True(options.RangeTwoSidedEnabled);
+      Assert.True(options.RangeFlipEnabled);
+      Assert.True(options.MultiMatchEnabled);
+      Assert.True(options.TrackAllStructuralMatches);
+      Assert.Equal(ExposurePolicy.HedgedConcurrent, options.ExposurePolicy);
+      options.Validate();
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_PROFILE", null);
+    }
+  }
+
+  [Fact]
+  public void DemoEvalHonoursExplicitEnvironmentOverrides()
+  {
+    Environment.SetEnvironmentVariable("AUTO_TRADE_PROFILE", "demo_eval");
+    Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_FLIP_ENABLED", "false");
+    Environment.SetEnvironmentVariable(
+      "AUTO_TRADE_ALLOW_CONCURRENT_STRATEGIES", "false"
+    );
+    try
+    {
+      var options = AutoTradeOptions.FromEnvironment();
+
+      Assert.False(options.RangeFlipEnabled);
+      Assert.False(options.AllowConcurrentStrategies);
+      Assert.Equal(ExposurePolicy.FlatOnly, options.ExposurePolicy);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_PROFILE", null);
+      Environment.SetEnvironmentVariable("AUTO_TRADE_RANGE_FLIP_ENABLED", null);
+      Environment.SetEnvironmentVariable(
+        "AUTO_TRADE_ALLOW_CONCURRENT_STRATEGIES", null
+      );
+    }
+  }
+
+  [Fact]
   public void RangeTargetsDefaultToSharedTwentyToSeventyLadder()
   {
     var options = AutoTradeOptions.FromEnvironment();

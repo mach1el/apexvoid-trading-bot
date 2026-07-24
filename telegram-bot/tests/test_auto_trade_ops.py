@@ -26,20 +26,58 @@ def _opened_event() -> dict:
 
 
 def test_render_auto_trade_event_filters_noise_and_escapes_message():
-  assert delivery.render_auto_trade_event({
+  rejected = delivery.render_auto_trade_event({
     "type": "rejected",
     "message": "ordinary candidate rejection",
-  }) is None
+  })
+  assert "EXECUTOR REJECTED" in rejected
+  assert "ordinary candidate rejection" in rejected
   text = delivery.render_auto_trade_event({
     "type": "opened",
     "message": "BUY <0.12> lots",
     "position_id": 91,
   })
   assert "ApexVoid Algo" in text
+  assert "ORDER FILLED" in text
   assert "Position opened" in text
   assert "BUY &lt;0.12&gt; lots" in text
   assert "91" not in text
   assert "auto trade" not in text.lower()
+
+
+def test_execution_lifecycle_cards_have_explicit_badges():
+  published = delivery.render_auto_trade_event({
+    "type": "candidate_published",
+    "strategy": "Range Edge Scalp",
+    "direction": "BUY",
+    "range_id": "range-1",
+    "configuration_profile": "demo_eval",
+  })
+  submitted = delivery.render_auto_trade_event({
+    "type": "order_submitted",
+    "strategy": "Range Edge Scalp",
+    "direction": "BUY",
+  })
+  managing = delivery.render_auto_trade_event({
+    "type": "managing",
+    "strategy": "Range Edge Scalp",
+    "direction": "BUY",
+  })
+  waiting = delivery.render_auto_trade_event({
+    "type": "zone_planned",
+    "message": "BUY limit is armed",
+  })
+  closed = delivery.render_auto_trade_event({
+    "type": "position_closed",
+    "message": "BUY position is closed",
+  })
+
+  assert "CANDIDATE PUBLISHED" in published
+  assert "OPPOSITE RANGE SIDE ARMED" in published
+  assert "ORDER SUBMITTED" in submitted
+  assert "POSITION MANAGING" in managing
+  assert "WAITING FOR PRICE" in waiting
+  assert "POSITION CLOSED" in closed
 
 
 def test_render_box_open_and_full_tp_as_shareable_cards():
@@ -140,7 +178,7 @@ def test_render_scale_in_zone_and_group_events():
   })
 
   assert "Scale-in filled" in scale_in
-  assert "Entry plan ready" in zone
+  assert "WAITING FOR PRICE" in zone
   assert "Trade result" in result
   assert "ApexVoid Algo" in scale_in + zone + result
 
@@ -148,6 +186,7 @@ def test_render_scale_in_zone_and_group_events():
 def test_internal_profile_hides_broker_position_id():
   assert delivery.render_auto_trade_event(_opened_event(), profile="internal") == (
     "🤖 <b>ApexVoid Algo</b>\n"
+    "✅ <b>ORDER FILLED</b>\n"
     "🔴 <b>XAU SELL opened</b>\n"
     "\n"
     "📍 Entry: <b>4,111.26</b>\n"

@@ -183,6 +183,7 @@ async def test_scanner_dedups_same_setup_level_and_only_dms_owner(monkeypatch):
   notify.assert_awaited_once()
   text = notify.await_args.args[0]
   assert "XAU M5 · SETUP FORMING" in text
+  assert "ANALYSIS ONLY" in text
   assert "BUY · Trend Pullback" in text
   assert "Trigger close:</b> <b>4,103</b>" in text
   assert "Entry zone:</b> <b>4,098–4,102</b>" in text
@@ -596,6 +597,49 @@ def test_range_scalp_alert_is_two_sided_and_keeps_target_reasons():
   assert "TP2 edge 4100" in text
 
 
+def test_scanner_card_always_classifies_auto_execution(monkeypatch):
+  result = scanner.DetectionResult(
+    "Range Edge Scalp",
+    "BUY",
+    4100,
+    Zone(4099.5, 4100.5, "demand", source="range_edge"),
+    4101,
+    3,
+    ["lower rail confirmed"],
+    mode="range_scalp",
+  )
+  ctx = SimpleNamespace(
+    tf="M5",
+    htf_bias="range",
+    structures={"M30": SimpleNamespace(bias="range")},
+    frames={"M5": _frame()},
+    regime=None,
+    spot_price=4100,
+    trigger_ts="2026-07-17T04:00:00Z",
+  )
+  monkeypatch.setattr(scanner.settings, "auto_trade_enabled", True)
+
+  ready = scanner._format_detection(
+    "XAU",
+    "M5",
+    ctx,
+    result,
+    ["M30"],
+    execution_match=SimpleNamespace(),
+  )
+  blocked = scanner._format_detection(
+    "XAU",
+    "M5",
+    ctx,
+    result,
+    ["M30"],
+    execution_match=None,
+  )
+
+  assert "AUTO READY" in ready
+  assert "AUTO BLOCKED" in blocked
+
+
 def test_scalp_status_reports_active_range_and_touched_edge():
   lower = ScalpBarrier(
     "support", 4100, 4099.7, 4100.3, 3, 3, 0, 8, ["micro ×3"], 8,
@@ -715,6 +759,27 @@ async def test_scanner_digest_suppresses_overlap_and_only_claims_sent(monkeypatc
   assert await client.get(scanner._dedup_key("XAU", "M5", results[0])) == "1"
   assert await client.get(scanner._dedup_key("XAU", "M5", results[2])) == "1"
   assert await client.get(scanner._dedup_key("XAU", "M5", results[1])) is None
+
+
+def test_scanner_digest_zero_top_n_keeps_all_distinct_results(monkeypatch):
+  monkeypatch.setattr(scanner.settings, "scanner_top_n", 0)
+  results = [
+    scanner.DetectionResult(
+      f"Setup {index}",
+      "BUY",
+      4000.0 + index * 10,
+      Zone(3999.0 + index * 10, 4001.0 + index * 10, "demand"),
+      4005.0 + index * 10,
+      3,
+      ["distinct structural thesis"],
+    )
+    for index in range(3)
+  ]
+
+  digest, conflicts = scanner._digest_results(results)
+
+  assert len(digest) == 3
+  assert conflicts == []
 
 
 @pytest.mark.asyncio
