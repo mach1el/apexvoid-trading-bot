@@ -180,16 +180,14 @@ public sealed class AutoTradeOptionsTests
   }
 
   [Fact]
-  public void RangeTargetsDefaultToSharedThirtyFortyFiftyLadder()
+  public void RangeTargetsDefaultToSharedTwentyToSeventyLadder()
   {
     var options = AutoTradeOptions.FromEnvironment();
 
     // Same default and env var (AUTO_TRADE_RANGE_TARGETS_PIPS) as
-    // app/autotrade/range_targets.py on the Python side - previously this
-    // executor independently hardcoded FullTakeProfitPips to exactly 50 or
-    // 70, duplicating (and able to drift from) Python's own ladder.
-    Assert.Equal(new[] { 30, 40, 50 }, options.EffectiveRangeTargetsPips);
-    Assert.Equal(5m, options.RangeTpBufferPips);
+    // app/autotrade/range_targets.py on the Python side.
+    Assert.Equal(new[] { 20, 30, 40, 50, 70 }, options.EffectiveRangeTargetsPips);
+    Assert.Equal(3m, options.RangeTpBufferPips);
   }
 
   [Fact]
@@ -198,7 +196,7 @@ public sealed class AutoTradeOptionsTests
     var options = Options();
 
     Assert.Null(options.RangeTargetsPips);
-    Assert.Equal(new[] { 30, 40, 50 }, options.EffectiveRangeTargetsPips);
+    Assert.Equal(new[] { 20, 30, 40, 50, 70 }, options.EffectiveRangeTargetsPips);
   }
 
   [Fact]

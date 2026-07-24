@@ -69,6 +69,8 @@ def _cfg(**overrides) -> SimpleNamespace:
     "auto_trade_map_counter_bias_min_confluence": 2,
     "auto_trade_map_track_distance_atr": 8.0,
     "auto_trade_map_execute_distance_atr": 1.5,
+    "auto_trade_map_execute_tolerance_pips": 0.0,
+    "auto_trade_map_execute_tolerance_atr": 0.0,
     "atr_length": 14,
     "proximal_band_atr": 0.5,
   }

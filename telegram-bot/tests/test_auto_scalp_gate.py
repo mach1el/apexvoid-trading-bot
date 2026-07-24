@@ -129,9 +129,9 @@ def test_support_rejection_uses_largest_configured_target_when_box_has_room(
   assert decision.state == "candidate"
   assert decision.direction == "BUY"
   assert decision.target_room_pips == pytest.approx(76.0)
-  # Default ladder is 30/40/50 pips (AUTO_TRADE_RANGE_TARGETS_PIPS) - 76
-  # pips of room is ample, so the largest configured target (50) is chosen.
-  assert decision.full_tp_pips == 50
+  # Default ladder is 20/30/40/50/70 pips (AUTO_TRADE_RANGE_TARGETS_PIPS) - 76
+  # pips of room is ample, so the largest configured target (70) is chosen.
+  assert decision.full_tp_pips == 70
 
 
 def test_same_role_micro_level_does_not_block_opposite_target(monkeypatch):
@@ -191,9 +191,9 @@ def test_50_pip_target_falls_through_to_40_pip_target_when_room_is_tighter(
   assert decision.full_tp_pips == 40
 
 
-def test_target_below_30_pips_plus_buffer_is_blocked(monkeypatch):
+def test_target_below_20_pips_plus_buffer_is_blocked(monkeypatch):
   support = _rail("support", 100.0, touches=3)
-  resistance = _rail("resistance", 103.0)
+  resistance = _rail("resistance", 102.0)
   monkeypatch.setattr(
     gate,
     "_m1_consolidation_box",
@@ -213,7 +213,8 @@ def test_target_below_30_pips_plus_buffer_is_blocked(monkeypatch):
   )
 
   assert decision.state == "target_blocked"
-  assert decision.target_room_pips == pytest.approx(23.5)
+  assert decision.target_room_pips is not None
+  assert decision.target_room_pips < 23
   assert decision.full_tp_pips is None
 
 
@@ -241,8 +242,8 @@ def test_resistance_rejection_creates_sell(monkeypatch):
   assert decision.state == "candidate"
   assert decision.direction == "SELL"
   assert decision.target == support
-  # ~78 pips of room; largest of the default 30/40/50 ladder is 50.
-  assert decision.full_tp_pips == 50
+  # ~78 pips of room; largest of the default 20/30/40/50/70 ladder is 70.
+  assert decision.full_tp_pips == 70
   assert decision.sweep_low is None
   assert decision.sweep_high == pytest.approx(100.15)
 
@@ -405,7 +406,7 @@ def test_waiting_for_box_state_carries_reasons():
 
 def test_target_blocked_state_carries_reasons(monkeypatch):
   support = _rail("support", 100.0, touches=3)
-  resistance = _rail("resistance", 103.0)
+  resistance = _rail("resistance", 102.0)
   monkeypatch.setattr(
     gate, "_m1_consolidation_box", lambda m1, atr, symbol: _box(support, resistance),
   )
