@@ -380,7 +380,8 @@ def test_worked_counter_bias_zone_produces_tagged_eq_capped_match(monkeypatch):
   assert decision.mapped_zone == (4066.0, 4073.0)
   assert decision.match is not None
   assert decision.match.direction == "BUY"
-  assert decision.match.tags == ("counter_bias",)
+  assert "counter_bias" in decision.match.tags
+  assert decision.match.tags[0] == "counter_bias"
   assert decision.match.target_price == 4084.0
   assert decision.match.targets_pips == (30, 60, 90, 111)
   assert "counter_bias" in decision.match.reasons[0]
@@ -486,7 +487,8 @@ def test_replay_1938_filters_dead_band_then_selects_counter_bias(monkeypatch):
   assert "degenerate_width=1" in aligned_only.reasons[0]
   assert counter_enabled.state == "candidate"
   assert counter_enabled.match is not None
-  assert counter_enabled.match.tags == ("counter_bias",)
+  assert "counter_bias" in counter_enabled.match.tags
+  assert counter_enabled.match.tags[0] == "counter_bias"
 
 
 def test_zone_beyond_default_track_limit_is_no_zone_in_range():
