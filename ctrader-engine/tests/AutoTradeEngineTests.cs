@@ -1050,6 +1050,61 @@ public sealed class AutoTradeEngineTests
   }
 
   [Fact]
+  public async Task PriceInsideSellZoneFallsBackToSingleEntryInsteadOfRejectingProximalSide()
+  {
+    // Production incident: Breakout Continuation SELL with price inside
+    // entry zone 4024.37-4027.45 (~4025.59). Classic proximal=zone.Low sits
+    // below bid and previously hard-rejected with
+    // "zone-fill proximal edge is not on the valid limit-order side".
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var store = new FakeAutoTradeStore(CandidateJson(
+      direction: "SELL",
+      entryLow: 4024.37m,
+      entryHigh: 4027.45m,
+      setup: "Auto Range Scalp",
+      mode: "auto_range_scalp",
+      structureSwing: 4027.45m
+    ));
+    var client = new FakeTradingClient();
+    var logs = new List<string>();
+    var engine = new AutoTradeEngine(
+      Options() with
+      {
+        ZoneFillEnabled = true,
+        ZoneFillFallbackEnabled = true,
+        InsideZoneMarketEntryEnabled = true,
+      },
+      store,
+      () => Now,
+      logs.Add
+    );
+    await engine.ObserveSpotAsync(
+      new SpotPrice("XAU", 4025.59m, 4025.79m, 1_000),
+      cts.Token
+    );
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await store.Ordered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    Assert.DoesNotContain(
+      store.Events,
+      item => item.Type == "rejected"
+        && item.Message.Contains(
+          "zone-fill proximal edge is not on the valid limit-order side"
+        )
+    );
+    Assert.Contains(
+      logs,
+      message => message.Contains("single-entry fallback")
+    );
+    Assert.NotEmpty(client.Orders);
+    Assert.Empty(client.LimitOrders);
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
+  [Fact]
   public async Task SessionCleanupDoesNotRaceQueuedSpotIntoDisconnectedClient()
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));

@@ -46,27 +46,37 @@ deduplication, and Market Map rendering do not control execution.
 
 `Range Edge Scalp` keeps its own range-specific execution plan: BUY at the
 matched lower edge or SELL at the matched upper edge, then close the full
-position at +50 or +70 pips while the detector continues to validate the box.
-Other strategies use the configured target ladder.
+position at the largest configured adaptive target
+(`AUTO_TRADE_RANGE_TARGETS_PIPS`, default `20,30,40,50,70`) that fits the
+available room. Other strategies use the configured target ladder.
+
+Matches carry an execution `tier` (`A`/`B`/`C`) and `risk_multiplier`. Tier B
+raises frequency at reduced risk; Tier C is analysis-only. Multiple typed
+matches are stored at `auto_trade:strategy_matches:{symbol}` while the primary
+legacy key remains `auto_trade:strategy_match:{symbol}`.
 
 ## Execution safety
 
 After a strategy matches, only execution invariants remain: enabled/paused
 state, typed-contract validity, match age, symbol and confluence, fresh quote,
-spread, entry drift, guarded news, structure stop bounds, opposing-zone stop
-safety, account authorization, idempotency, and exposure rules. These checks
-can refuse an unsafe order but cannot reinterpret the PA setup.
+spread, **strategy-aware** entry drift, guarded news, structure stop bounds,
+opposing-zone stop safety, account authorization, idempotency, and exposure
+rules. These checks can refuse an unsafe order but cannot reinterpret the PA
+setup. Zone-fill geometry that places the proximal edge on the wrong limit
+side falls back to single-entry instead of hard-rejecting.
 
 ## Redis contract
 
 ```text
 SETEX auto_trade:strategy_match:{SYMBOL} <ttl> <StrategyMatch JSON>
+SETEX auto_trade:strategy_matches:{SYMBOL} <ttl> <StrategyMatch JSON array>
 ```
 
 The payload includes a stable `match_id`, source timeframe/event, detector
 strategy and mode, direction, entry/key level, ATR, structure swing, target
-plan, confluence, and reasons. Optional range fields are valid only for a
-range-edge strategy. Malformed, expired, or symbol-mismatched data fails closed.
+plan, confluence, reasons, `tier`, `risk_multiplier`, and optional `family` /
+`range_state`. Optional range fields are valid only for a range-edge strategy.
+Malformed, expired, or symbol-mismatched data fails closed.
 
 Every Market Map evaluation also replaces this one-hour diagnostic snapshot:
 
