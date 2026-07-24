@@ -83,6 +83,11 @@ bot: DB ready at /data/signals.db
 bot: Starting Telegram polling
 ```
 
+For autonomous execution on the broker-confirmed demo account, use the
+[demo evaluation runbook](demo-eval-autotrade.md). It includes the complete
+profile contract, live-account fail-closed behavior, and Redis evidence
+commands.
+
 ## 5. Smoke test
 
 DM your bot:
