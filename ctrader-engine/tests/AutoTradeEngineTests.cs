@@ -2951,6 +2951,54 @@ public sealed class AutoTradeEngineTests
     Assert.Contains("config_mismatch", store.Metrics);
   }
 
+  [Fact]
+  public async Task WarningOnlyConfigurationPublishesReadyExecutor()
+  {
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var options = DemoEvalOptions() with
+    {
+      CandidateMaxAgeSeconds = 420,
+      CandidateStorageTtlSeconds = 604800,
+      Symbols = ["XAU"],
+    };
+    var store = new FakeAutoTradeStore(CandidateJson());
+    var client = new FakeTradingClient
+    {
+      Account = ValidAccount() with { AccountType = "Netted" },
+    };
+    var manifest = AutoTradeConfigHealth.Build(
+      options,
+      client.Account,
+      Symbol,
+      Now.ToUnixTimeSeconds()
+    );
+    store.Values[AutoTradeConfigHealth.PythonManifestKey] =
+      JsonSerializer.Serialize(
+        manifest,
+        new JsonSerializerOptions
+        {
+          PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        }
+      );
+    var engine = new AutoTradeEngine(options, store, () => Now, _ => { });
+
+    var run = engine.RunSessionAsync(client, Symbol, cts.Token);
+    await WaitForEventAsync(store, "ready");
+
+    var readiness = JsonDocument.Parse(
+      store.Values[AutoTradeConfigHealth.ReadinessKey]
+    ).RootElement;
+    Assert.True(readiness.GetProperty("ready").GetBoolean());
+    Assert.Equal("ready", readiness.GetProperty("state").GetString());
+    Assert.Contains(
+      readiness.GetProperty("warnings").EnumerateArray(),
+      item => item.GetString() == "broker_non_hedged"
+    );
+
+    cts.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+  }
+
   private static async Task WaitForEventAsync(FakeAutoTradeStore store, string type)
   {
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));

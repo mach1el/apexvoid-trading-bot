@@ -4,7 +4,10 @@ from types import SimpleNamespace
 import fakeredis
 import pytest
 
+from app.autotrade.config_health import canonicalize_account_mode
+from app.autotrade.config_health import canonicalize_broker
 from app.autotrade.config_health import compare_manifests
+from app.autotrade.config_health import python_manifest
 from app.autotrade.config_health import publish_python_manifest
 from app.autotrade.gate import AutoScalpDecision
 from app.autotrade.lifecycle import emit_lifecycle
@@ -49,6 +52,14 @@ def test_demo_profile_resolves_execution_defaults(monkeypatch):
   assert cfg.auto_trade_allow_counter_bias
   assert cfg.auto_trade_multi_match_enabled
   assert cfg.auto_trade_track_all_structural_matches
+  assert cfg.auto_trade_enabled
+  assert not cfg.auto_trade_dry_run
+  assert cfg.auto_trade_candidate_contract_version == 5
+  assert cfg.auto_trade_candidate_max_age_seconds == 420
+  assert cfg.auto_trade_candidate_ttl == 604800
+  assert cfg.auto_trade_spot_max_age == 5
+  assert cfg.auto_trade_zone_fill_enabled
+  assert cfg.auto_trade_non_hedged_opposite_policy == "broker_netting"
   assert cfg.scanner_top_n == 0
   assert cfg.auto_trade_max_tracked_candidates == 0
 
@@ -58,10 +69,14 @@ def test_demo_profile_does_not_override_explicit_environment(monkeypatch):
     monkeypatch,
     AUTO_TRADE_RANGE_FLIP_ENABLED="false",
     AUTO_TRADE_ALLOW_HEDGED_XAU="false",
+    AUTO_TRADE_CANDIDATE_MAX_AGE_SECONDS="123",
+    AUTO_TRADE_CANDIDATE_STORAGE_TTL_SECONDS="456",
     SCANNER_TOP_N="7",
   )
   assert not cfg.auto_trade_range_flip_enabled
   assert not cfg.auto_trade_allow_hedged_xau
+  assert cfg.auto_trade_candidate_max_age_seconds == 123
+  assert cfg.auto_trade_candidate_ttl == 456
   assert cfg.scanner_top_n == 7
 
 
@@ -281,4 +296,154 @@ def test_config_health_detects_dry_run_split_brain():
   health = compare_manifests(python, ctrader)
 
   assert health["state"] == "fatal"
-  assert set(health["fatal"]) >= {"dry_run", "manual_algo_dry_run"}
+  assert "dry_run" in health["fatal"]
+  assert "manual_algo_dry_run" in health["warnings"]
+
+
+def _contract_manifest(**overrides):
+  base = {
+    "config_manifest_version": 2,
+    "auto_trade_enabled": True,
+    "dry_run": False,
+    "candidate_stream": "auto_trade:candidates",
+    "event_stream": "auto_trade:events",
+    "redis_database": 0,
+    "redis_fingerprint": "same",
+    "symbols": ["XAU", "EURUSD"],
+    "canonical_symbol": "XAU",
+    "pip_size": 0.1,
+    "contract_size": 100,
+    "candidate_contract_version": 5,
+    "target_plans": [30, 60, 90, 120, 200],
+    "range_target_plans": [20, 30, 40, 50, 70],
+    "range_tp_buffer": 3,
+    "candidate_execution_max_age_seconds": 420,
+    "candidate_storage_ttl_seconds": 604800,
+    "spot_max_age_seconds": 5,
+    "require_demo_account": True,
+    "account_mode": "demo",
+    "broker": "fpmarkets",
+    "broker_hedging_capability": True,
+    "profile": "demo_eval",
+  }
+  return {**base, **overrides}
+
+
+def test_config_contract_normalizes_order_aliases_and_numeric_tokens():
+  python = _contract_manifest(
+    symbols=["XAU", "EURUSD"],
+    range_target_plans=[70, 50, 40, 30, 20, 20],
+    range_tp_buffer=3.0,
+    contract_size=100.0,
+    broker="fpmarkets",
+    account_mode="demo_required",
+  )
+  ctrader = _contract_manifest(
+    symbols=["EURUSD", "XAU"],
+    range_target_plans=[20, 30, 40, 50, 70],
+    range_tp_buffer=3,
+    contract_size=100,
+    broker="fpmarketssc",
+    account_mode="demo",
+  )
+
+  health = compare_manifests(python, ctrader)
+
+  assert health["state"] == "healthy"
+  assert health["fatal"] == []
+
+
+def test_config_contract_keeps_genuine_target_difference_fatal():
+  python = _contract_manifest(
+    range_target_plans=[20, 30, 40, 50, 70],
+  )
+  ctrader = _contract_manifest(
+    range_target_plans=[20, 30, 50, 70],
+  )
+
+  health = compare_manifests(python, ctrader)
+
+  assert health["state"] == "fatal"
+  assert "range_target_plans" in health["fatal"]
+
+
+def test_storage_ttl_is_warning_but_candidate_age_is_fatal():
+  python = _contract_manifest(candidate_storage_ttl_seconds=86400)
+  ctrader = _contract_manifest(candidate_storage_ttl_seconds=604800)
+  health = compare_manifests(python, ctrader)
+  assert health["state"] == "healthy"
+  assert health["fatal"] == []
+  assert "candidate_storage_ttl_seconds" in health["warnings"]
+
+  ctrader["candidate_execution_max_age_seconds"] = 90
+  health = compare_manifests(python, ctrader)
+  assert health["state"] == "fatal"
+  assert "candidate_execution_max_age_seconds" in health["fatal"]
+
+
+def test_broker_and_account_aliases_are_canonical():
+  assert canonicalize_broker("fpmarkets-sc") == "fpmarkets"
+  assert canonicalize_broker("FP Markets SC") == "fpmarkets"
+  assert canonicalize_account_mode("demo_required") == "demo"
+  assert canonicalize_account_mode("demo-only") == "demo"
+
+
+def test_manifest_canonicalizes_descending_runtime_targets(monkeypatch):
+  cfg = _settings(
+    monkeypatch,
+    AUTO_TRADE_RANGE_TARGETS_PIPS="70,50,40,30,20,20",
+  )
+  monkeypatch.setattr(config_health, "settings", cfg)
+  monkeypatch.setattr(
+    config_health,
+    "configured_range_targets",
+    lambda: (70, 50, 40, 30, 20),
+  )
+
+  manifest = python_manifest()
+
+  assert manifest["range_target_plans"] == [20, 30, 40, 50, 70]
+  assert manifest["candidate_contract_version"] == 5
+  assert manifest["config_manifest_version"] == 2
+
+
+def test_canonical_environment_precedes_legacy_alias(monkeypatch):
+  cfg = _settings(
+    monkeypatch,
+    AUTO_TRADE_CANDIDATE_STREAM="canonical:candidates",
+    AUTO_TRADE_STREAM="legacy:candidates",
+    AUTO_TRADE_TARGET_PLANS_PIPS="30,60,90,120,200",
+    AUTO_TRADE_TP_PIPS="1,2,3,4,5",
+  )
+
+  assert cfg.auto_trade_stream == "canonical:candidates"
+  assert cfg.auto_trade_tp_pips == "30,60,90,120,200"
+
+
+@pytest.mark.parametrize(
+  ("configured", "expected"),
+  [
+    ("true", True),
+    ("TRUE", True),
+    ("1", True),
+    ("yes", True),
+    ("false", False),
+    ("0", False),
+    ("NO", False),
+  ],
+)
+def test_python_boolean_parser_accepts_documented_forms(
+  monkeypatch,
+  configured,
+  expected,
+):
+  cfg = _settings(monkeypatch, AUTO_TRADE_RANGE_FLIP_ENABLED=configured)
+  assert cfg.auto_trade_range_flip_enabled is expected
+
+
+def test_python_boolean_parser_rejects_unknown_value(monkeypatch):
+  with pytest.raises(ValueError, match="boolean"):
+    _settings(
+      monkeypatch,
+      AUTO_TRADE_RANGE_FLIP_ENABLED="enable-ish",
+    )

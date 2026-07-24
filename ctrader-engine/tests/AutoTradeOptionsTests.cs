@@ -196,6 +196,13 @@ public sealed class AutoTradeOptionsTests
       Assert.True(options.RangeFlipEnabled);
       Assert.True(options.MultiMatchEnabled);
       Assert.True(options.TrackAllStructuralMatches);
+      Assert.True(options.Enabled);
+      Assert.False(options.DryRun);
+      Assert.Equal(420, options.CandidateMaxAgeSeconds);
+      Assert.Equal(604800, options.CandidateStorageTtlSeconds);
+      Assert.Equal(5, options.CandidateContractVersion);
+      Assert.True(options.ZoneFillEnabled);
+      Assert.Equal("broker_netting", options.NonHedgedOppositePolicy);
       Assert.Equal(ExposurePolicy.HedgedConcurrent, options.ExposurePolicy);
       options.Validate();
     }
@@ -283,6 +290,87 @@ public sealed class AutoTradeOptionsTests
     Assert.Throws<AutoTradeConfigurationException>(
       () => (Options() with { RangeTpBufferPips = -1m }).Validate()
     );
+  }
+
+  [Fact]
+  public void CanonicalEnvironmentTakesPrecedenceOverDeprecatedAlias()
+  {
+    Environment.SetEnvironmentVariable(
+      "AUTO_TRADE_CANDIDATE_STREAM", "canonical:candidates"
+    );
+    Environment.SetEnvironmentVariable(
+      "AUTO_TRADE_STREAM", "legacy:candidates"
+    );
+    Environment.SetEnvironmentVariable(
+      "AUTO_TRADE_TARGET_PLANS_PIPS", "30,60,90,120,200"
+    );
+    Environment.SetEnvironmentVariable(
+      "AUTO_TRADE_TP_PIPS", "1,2,3,4,5"
+    );
+    try
+    {
+      var options = AutoTradeOptions.FromEnvironment();
+
+      Assert.Equal("canonical:candidates", options.CandidateStream);
+      Assert.Equal(
+        new[] { 30, 60, 90, 120, 200 },
+        options.TargetsPips
+      );
+      Assert.Equal(
+        "explicit_env",
+        options.ConfigSources!["AUTO_TRADE_CANDIDATE_STREAM"]
+      );
+      Assert.Contains("AUTO_TRADE_STREAM", options.DeprecatedVariables!);
+      Assert.Contains("AUTO_TRADE_TP_PIPS", options.DeprecatedVariables!);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_CANDIDATE_STREAM", null);
+      Environment.SetEnvironmentVariable("AUTO_TRADE_STREAM", null);
+      Environment.SetEnvironmentVariable("AUTO_TRADE_TARGET_PLANS_PIPS", null);
+      Environment.SetEnvironmentVariable("AUTO_TRADE_TP_PIPS", null);
+    }
+  }
+
+  [Theory]
+  [InlineData("true", true)]
+  [InlineData("TRUE", true)]
+  [InlineData("1", true)]
+  [InlineData("yes", true)]
+  [InlineData("false", false)]
+  [InlineData("0", false)]
+  [InlineData("NO", false)]
+  public void StrictBooleanParserAcceptsDocumentedForms(
+    string configured,
+    bool expected
+  )
+  {
+    Environment.SetEnvironmentVariable("AUTO_TRADE_ENABLED", configured);
+    try
+    {
+      Assert.Equal(expected, AutoTradeOptions.FromEnvironment().Enabled);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_ENABLED", null);
+    }
+  }
+
+  [Fact]
+  public void StrictBooleanParserRejectsUnknownValue()
+  {
+    Environment.SetEnvironmentVariable("AUTO_TRADE_ENABLED", "enable-ish");
+    try
+    {
+      var error = Assert.Throws<AutoTradeConfigurationException>(
+        AutoTradeOptions.FromEnvironment
+      );
+      Assert.Contains("AUTO_TRADE_ENABLED", error.Message);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("AUTO_TRADE_ENABLED", null);
+    }
   }
 
   private static AutoTradeOptions Options() => new(

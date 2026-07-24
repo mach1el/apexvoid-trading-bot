@@ -29,8 +29,22 @@ AUTO_TRADE_LIQUIDITY_REVERSAL_ENABLED=true
 AUTO_TRADE_MULTI_MATCH_ENABLED=true
 AUTO_TRADE_ALLOW_COUNTER_BIAS=true
 AUTO_TRADE_TRACK_ALL_STRUCTURAL_MATCHES=true
-AUTO_TRADE_CANDIDATE_CONTRACT_VERSION=4
+AUTO_TRADE_CANDIDATE_STREAM=auto_trade:candidates
+AUTO_TRADE_EVENT_STREAM=auto_trade:events
+AUTO_TRADE_CANDIDATE_CONTRACT_VERSION=5
+AUTO_TRADE_SYMBOLS=XAU
 AUTO_TRADE_CANONICAL_SYMBOL=XAU
+AUTO_TRADE_XAU_PIP_SIZE=0.1
+AUTO_TRADE_XAU_CONTRACT_SIZE=100
+AUTO_TRADE_TARGET_PLANS_PIPS=30,60,90,120,200
+AUTO_TRADE_RANGE_TARGETS_PIPS=20,30,40,50,70
+AUTO_TRADE_RANGE_TP_BUFFER_PIPS=3
+AUTO_TRADE_CANDIDATE_MAX_AGE_SECONDS=420
+AUTO_TRADE_CANDIDATE_STORAGE_TTL_SECONDS=604800
+AUTO_TRADE_SPOT_MAX_AGE_SECONDS=5
+AUTO_TRADE_ZONE_FILL_ENABLED=true
+AUTO_TRADE_MIN_CONFLUENCE=2
+AUTO_TRADE_NON_HEDGED_OPPOSITE_POLICY=broker_netting
 MANUAL_ALGO_ENABLED=true
 MANUAL_ALGO_DRY_RUN=false
 SCANNER_TOP_N=0
@@ -53,9 +67,18 @@ dry-run or rejection.
 Run tests before building or restarting the demo services:
 
 ```bash
-cd /opt/apexvoid-trading-bot
-docker compose build bot ctrader-engine
-docker compose up -d --no-deps bot ctrader-engine
+git fetch origin
+git checkout master
+git pull --ff-only origin master
+docker compose config
+docker compose build --no-cache bot ctrader-engine
+docker compose up -d --force-recreate bot ctrader-engine
+docker compose exec redis redis-cli DEL \
+  auto_trade:config_manifest:python \
+  auto_trade:config_manifest:ctrader \
+  auto_trade:config_health \
+  auto_trade:executor_readiness
+docker compose restart bot ctrader-engine
 docker compose ps bot ctrader-engine
 docker compose logs --since=10m bot ctrader-engine
 ```
@@ -71,6 +94,7 @@ executor.
 docker compose exec redis redis-cli GET auto_trade:config_manifest:python
 docker compose exec redis redis-cli GET auto_trade:config_manifest:ctrader
 docker compose exec redis redis-cli GET auto_trade:config_health
+docker compose exec redis redis-cli GET auto_trade:executor_readiness
 docker compose exec redis redis-cli GET auto_trade:executor_snapshot:XAU
 docker compose exec redis redis-cli GET auto_trade:range_context:XAU
 docker compose exec redis redis-cli GET auto_trade:range_context_compare:XAU
@@ -92,7 +116,8 @@ The evaluation evidence is:
 - `config_health.state` is `healthy`.
 - Python and executor manifests agree on enabled state, dry-run state, manual
   state, candidate/event streams, Redis DB, symbol, pip size and target plans.
-- The executor snapshot reports `demo=true`, `hedged=true`, and `ready=true`.
+- Executor readiness reports `ready=true`. A non-hedged demo account is a
+  warning and follows `AUTO_TRADE_NON_HEDGED_OPPOSITE_POLICY`.
 - Both BUY and SELL range-side keys coexist.
 - `strategy_matches:XAU` contains distinct active theses.
 - Lifecycle history reaches `order_filled` and `managing` for BUY and SELL.
