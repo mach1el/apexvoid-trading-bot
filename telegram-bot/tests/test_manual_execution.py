@@ -3,10 +3,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pandas as pd
 import pytest
 
-from app.analysis.types import Zone
 from app.core.config import settings
 from app.persistence import redis_state, store
 from app.signals import broadcast, manual_execution
@@ -44,7 +42,7 @@ def test_intent_to_candidate_payload_sell_uses_entry_low_reference_edge():
   assert payload["candidate_id"] == "manual:47:0"
   assert payload["symbol"] == "XAU"
   assert payload["timeframe"] == "M1"
-  assert payload["setup"] == "Manual Algo"
+  assert payload["setup"] == "golden-fib"
   assert payload["mode"] == "manual_algo"
   assert payload["direction"] == "SELL"
   assert payload["entry_zone"] == {"low": 4100.0, "high": 4105.0}
@@ -55,6 +53,10 @@ def test_intent_to_candidate_payload_sell_uses_entry_low_reference_edge():
   # own SELL -> entry convention): |4100-4095|=5 -> 50p, |4100-4090|=10 ->
   # 100p, |4100-4080|=20 -> 200p.
   assert payload["targets_pips"] == [50, 100, 200]
+  assert payload["manual_take_profits"] == [4095.0, 4090.0, 4080.0]
+  assert payload["group_id"] == "manual:47:0"
+  assert payload["strategy_family"] == "manual"
+  assert payload["parent_group_id"] is None
   assert payload["current_price"] == pytest.approx(4100.0)
   assert payload["key_level"] == pytest.approx(4100.0)
 
@@ -162,94 +164,16 @@ async def test_reconcile_events_loop_is_a_no_op_when_disabled():
   await asyncio.wait_for(manual_execution.reconcile_events_loop(), timeout=2)
 
 
-# ---------------------------------------------------------------------------
-# _warn_if_would_be_vetoed (Fixes 1/3/4: manual_algo is exempt from every
-# worker.py veto by construction - it never touches worker.py at all - but
-# should still warn the owner when an entry would have been refused on the
-# auto path.)
-# ---------------------------------------------------------------------------
-
-def _stub_frames_and_atr(monkeypatch, atr: float) -> None:
-  monkeypatch.setattr(
-    manual_execution.worker,
-    "_load_frames",
-    AsyncMock(return_value={"M1": pd.DataFrame({"close": [4116.9]})}),
-  )
-  monkeypatch.setattr(
-    manual_execution, "atr_series", lambda df, length: pd.Series([atr]),
-  )
-
-
 @pytest.mark.asyncio
-async def test_warn_if_would_be_vetoed_sends_owner_dm_for_opposing_barrier(
+async def test_manual_intent_bypasses_worker_strategy_gates(
   monkeypatch,
 ):
-  monkeypatch.setattr(manual_execution.settings, "telegram_owner_id", 4242)
-  _stub_frames_and_atr(monkeypatch, atr=1.2)
-  monkeypatch.setattr(
-    manual_execution.worker,
-    "_htf_zones",
-    lambda frames, cfg: [Zone(4116.0, 4127.0, "supply", touches=8)],
-  )
-  monkeypatch.setattr(manual_execution.worker, "_htf_levels", lambda frames, cfg: [])
-  monkeypatch.setattr(manual_execution.worker, "decode_market_map", lambda raw: None)
-  sent = AsyncMock()
-  monkeypatch.setattr(manual_execution, "send_scanner_with_retry", sent)
-  client = redis_state.get_client()
-  intent = _intent(direction="BUY", entry_low=4116.0, entry_high=4116.5)
-
-  # Never a veto: manual_algo never calls worker.py's publish functions at
-  # all, so there is nothing here to "pass" or "block" - only to warn about.
-  await manual_execution._warn_if_would_be_vetoed(client, intent, 4116.25)
-
-  sent.assert_awaited_once()
-  text = sent.await_args.args[0]
-  assert "would be refused" in text
-  assert "inside opposing" in text
-
-
-@pytest.mark.asyncio
-async def test_warn_if_would_be_vetoed_is_silent_when_nothing_would_fire(
-  monkeypatch,
-):
-  monkeypatch.setattr(manual_execution.settings, "telegram_owner_id", 4242)
-  _stub_frames_and_atr(monkeypatch, atr=1.2)
-  monkeypatch.setattr(manual_execution.worker, "_htf_zones", lambda frames, cfg: [])
-  monkeypatch.setattr(manual_execution.worker, "_htf_levels", lambda frames, cfg: [])
-  monkeypatch.setattr(manual_execution.worker, "decode_market_map", lambda raw: None)
-  sent = AsyncMock()
-  monkeypatch.setattr(manual_execution, "send_scanner_with_retry", sent)
-  client = redis_state.get_client()
-  intent = _intent(direction="BUY", entry_low=4116.0, entry_high=4116.5)
-
-  await manual_execution._warn_if_would_be_vetoed(client, intent, 4116.25)
-
-  sent.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_manual_intent_inside_cooldown_is_still_published_but_warns(
-  monkeypatch,
-):
-  """Fix 3's manual-path rule: manual_algo is exempt from the cooldown veto
-  (the owner may deliberately re-enter a failed zone) - the intent is still
-  bridged onto auto_trade:candidates, just with an owner warning alongside.
-  """
   monkeypatch.setattr(manual_execution.settings, "auto_trade_stream", "auto_trade:test3")
   monkeypatch.setattr(manual_execution.settings, "auto_trade_stream_maxlen", 100)
   monkeypatch.setattr(manual_execution.settings, "telegram_owner_id", 4242)
-  monkeypatch.setattr(manual_execution.settings, "auto_trade_zone_cooldown_atr", 1.0)
-  _stub_frames_and_atr(monkeypatch, atr=2.0)
-  monkeypatch.setattr(manual_execution.worker, "_htf_zones", lambda frames, cfg: [])
-  monkeypatch.setattr(manual_execution.worker, "_htf_levels", lambda frames, cfg: [])
-  monkeypatch.setattr(manual_execution.worker, "decode_market_map", lambda raw: None)
   sent = AsyncMock()
   monkeypatch.setattr(manual_execution, "send_scanner_with_retry", sent)
   client = redis_state.get_client()
-  await client.set(
-    manual_execution.worker._zone_cooldown_key("XAU", "BUY"),
-    json.dumps({"entry_price": 4116.25, "stop_price": 4111.54, "closed_at": 1000}),
-  )
   intent_payload = {
     "intent_id": "manual:9:0",
     "manual_signal_id": 9,
@@ -274,8 +198,9 @@ async def test_manual_intent_inside_cooldown_is_still_published_but_warns(
   assert cursor == "201-0"
   candidates = await client.xrange("auto_trade:test3")
   assert len(candidates) == 1
-  sent.assert_awaited_once()
-  assert "zone cooldown" in sent.await_args.args[0]
+  candidate = json.loads(candidates[0][1]["payload"])
+  assert candidate["mode"] == "manual_algo"
+  sent.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +243,8 @@ async def test_handle_event_fill_marks_filled_records_broker_fields_and_activate
   monkeypatch,
 ):
   send = _mock_send(monkeypatch)
+  truth = AsyncMock()
+  monkeypatch.setattr(manual_execution, "_send_executor_truth", truth)
   sid = await _algo_signal()
   client = redis_state.get_client()
   positions: dict[int, int] = {}
@@ -327,6 +254,7 @@ async def test_handle_event_fill_marks_filled_records_broker_fields_and_activate
     "position_id": 555,
     "candidate_id": f"manual:{sid}:0",
     "setup": "Manual Algo",
+    "stream": "algo_manual",
     "price": 4100.5,
     "volume": 600,
   }
@@ -340,6 +268,62 @@ async def test_handle_event_fill_marks_filled_records_broker_fields_and_activate
   assert row["algo_armed"] is True
   assert row["fill_state"] == "filled"
   send.assert_awaited_once()
+  truth.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_limit_placed_event_is_the_first_broker_confirmation(monkeypatch):
+  sid = await _algo_signal()
+  truth = AsyncMock()
+  monkeypatch.setattr(manual_execution, "_send_executor_truth", truth)
+  event = {
+    "type": "manual_limit_placed",
+    "stream": "algo_manual",
+    "candidate_id": f"manual:{sid}:0",
+    "direction": "SELL",
+    "entry_low": 4100.0,
+    "entry_high": 4105.0,
+    "stop_loss": 4110.0,
+    "target_prices": [4095.0, 4090.0, 4080.0],
+    "order_id": 777,
+  }
+
+  await manual_execution._handle_event(
+    redis_state.get_client(), event, {},
+  )
+
+  row = await store.get_manual_signal(sid)
+  assert row["execution_status"] == "pending"
+  truth.assert_awaited_once()
+  text = truth.await_args.args[0]
+  assert "LIMIT ORDER PLACED" in text
+  assert "777" in text
+  assert f"manual:{sid}:0" in text
+
+
+@pytest.mark.asyncio
+async def test_manual_rejection_reports_machine_reason(monkeypatch):
+  sid = await _algo_signal()
+  truth = AsyncMock()
+  monkeypatch.setattr(manual_execution, "_send_executor_truth", truth)
+  event = {
+    "type": "rejected",
+    "stream": "algo_manual",
+    "candidate_id": f"manual:{sid}:0",
+    "reason_code": "broker_account_not_hedged_for_opposite_manual_order",
+  }
+
+  await manual_execution._handle_event(
+    redis_state.get_client(), event, {},
+  )
+
+  row = await store.get_manual_signal(sid)
+  assert row["execution_status"] == "rejected"
+  assert row["execution_error"] == (
+    "broker_account_not_hedged_for_opposite_manual_order"
+  )
+  assert "ORDER REJECTED" in truth.await_args.args[0]
+  assert "No broker order submitted" in truth.await_args.args[0]
 
 
 @pytest.mark.asyncio

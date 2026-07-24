@@ -751,14 +751,13 @@ async def test_scanner_digest_suppresses_overlap_and_only_claims_sent(monkeypatc
     notify=notify,
   )
 
-  assert [item.setup for item in sent] == ["Snap-Back", "Break & Retest"]
+  assert [item.setup for item in sent] == ["Snap-Back", "Fade Scalp"]
   text = notify.await_args.args[0]
   assert text.count("SETUP FORMING") == 1
   assert "Snap-Back" in text
-  assert "Also:</b> Break&amp;Retest" in text
   assert await client.get(scanner._dedup_key("XAU", "M5", results[0])) == "1"
-  assert await client.get(scanner._dedup_key("XAU", "M5", results[2])) == "1"
-  assert await client.get(scanner._dedup_key("XAU", "M5", results[1])) is None
+  assert await client.get(scanner._dedup_key("XAU", "M5", results[1])) == "1"
+  assert await client.get(scanner._dedup_key("XAU", "M5", results[2])) is None
 
 
 def test_scanner_digest_zero_top_n_keeps_all_distinct_results(monkeypatch):
@@ -783,7 +782,7 @@ def test_scanner_digest_zero_top_n_keeps_all_distinct_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_scanner_zone_band_dedup_suppresses_cross_setup_ideas(monkeypatch):
+async def test_scanner_zone_band_dedup_preserves_cross_setup_ideas(monkeypatch):
   client = redis_state.get_client()
   notify = AsyncMock()
   monkeypatch.setattr(scanner.settings, "scanner_symbols", "XAU")
@@ -866,15 +865,16 @@ async def test_scanner_zone_band_dedup_suppresses_cross_setup_ideas(monkeypatch)
   )
 
   assert first == [result_a]
-  assert same_band == []
+  assert same_band == [result_b]
   assert far_band == [result_far]
-  assert notify.await_count == 2
+  assert notify.await_count == 3
   first_text = notify.await_args_list[0].args[0]
   assert "range-bound 4,097-4,110 (M5)" in first_text
   assert await client.get(scanner._band_dedup_key("XAU", result_a)) == "1"
-  assert await client.get(scanner._dedup_key("XAU", "M5", result_b)) is None
+  assert await client.get(scanner._dedup_key("XAU", "M5", result_b)) == "1"
 
-  await client.delete(scanner._band_dedup_key("XAU", result_a))
+  await client.delete(scanner._band_dedup_key("XAU", result_b))
+  await client.delete(scanner._dedup_key("XAU", "M5", result_b))
   # This fixture's frame never advances, so result_far's zone would read as
   # "invalidated" (B3) on the very next scan against the same static close -
   # clear its tracking state, matching the band-dedup reset above, since this
@@ -892,7 +892,7 @@ async def test_scanner_zone_band_dedup_suppresses_cross_setup_ideas(monkeypatch)
   )
 
   assert after_ttl == [result_b]
-  assert notify.await_count == 3
+  assert notify.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -957,6 +957,58 @@ async def test_box_breakout_second_alert_on_same_edge_is_band_deduped(monkeypatc
   assert "accepted (2 closes)" in text
   assert "measured +13.0" in text
   assert "coil" in text
+
+
+@pytest.mark.asyncio
+async def test_band_dedup_preserves_a_different_structural_setup(monkeypatch):
+  client = redis_state.get_client()
+  notify = AsyncMock()
+  monkeypatch.setattr(scanner.settings, "telegram_owner_id", 4242)
+  first = scanner.DetectionResult(
+    "Trend Pullback",
+    "BUY",
+    4100.0,
+    Zone(4099.5, 4100.5, "demand", score=9),
+    4101.0,
+    2,
+    ["HTF bias up"],
+  )
+  second = scanner.DetectionResult(
+    "Demand Reaction",
+    "BUY",
+    4100.0,
+    Zone(4099.5, 4100.5, "demand", score=9),
+    4101.0,
+    2,
+    ["HTF bias up"],
+  )
+  await client.set(
+    scanner._band_dedup_key("XAU", first),
+    "1",
+    ex=3600,
+  )
+  ctx = SimpleNamespace(
+    tf="M5",
+    htf_bias="up",
+    structures={"M30": SimpleNamespace(bias="up")},
+    frames={"M5": _frame()},
+    regime=None,
+    spot_price=None,
+    trigger_ts="2026-07-10T00:00:00Z",
+  )
+
+  sent = await scanner._notify_digest_once(
+    client,
+    "XAU",
+    "M5",
+    ctx,
+    [first, second],
+    notify,
+    ["M30"],
+  )
+
+  assert sent == [second]
+  assert notify.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1222,9 @@ async def test_scanner_missing_spot_keeps_fallback_without_warning(monkeypatch, 
 def test_opposite_direction_conflict_with_decisive_margin_keeps_stronger(
   monkeypatch,
 ):
+  monkeypatch.setattr(
+    scanner.settings, "auto_trade_track_all_structural_matches", False,
+  )
   monkeypatch.setattr(scanner.settings, "scanner_conflict_overlap", 0.5)
   monkeypatch.setattr(scanner.settings, "scanner_conflict_margin", 1)
   # Numbers lifted straight from the 22 Jul 2026 incident: overlap ratio 1.0.
@@ -1192,6 +1247,9 @@ def test_opposite_direction_conflict_with_decisive_margin_keeps_stronger(
 
 
 def test_opposite_direction_conflict_with_equal_confluence_drops_both(monkeypatch):
+  monkeypatch.setattr(
+    scanner.settings, "auto_trade_track_all_structural_matches", False,
+  )
   monkeypatch.setattr(scanner.settings, "scanner_conflict_overlap", 0.5)
   monkeypatch.setattr(scanner.settings, "scanner_conflict_margin", 1)
   a = scanner.DetectionResult(
@@ -1210,8 +1268,27 @@ def test_opposite_direction_conflict_with_equal_confluence_drops_both(monkeypatc
   assert conflicts[0]["outcome"] == "both_dropped"
 
 
-def test_same_direction_overlap_behaviour_is_unchanged(monkeypatch):
-  """Regression guard: B1 only changes opposite-direction handling."""
+def test_demo_eval_preserves_opposite_direction_structural_matches(monkeypatch):
+  monkeypatch.setattr(
+    scanner.settings, "auto_trade_track_all_structural_matches", True,
+  )
+  monkeypatch.setattr(scanner.settings, "auto_trade_allow_counter_bias", True)
+  buy = scanner.DetectionResult(
+    "Demand Reaction", "BUY", 4121.5,
+    Zone(4121.22, 4126.14, "demand"), 4123.0, 3, ["local demand"],
+  )
+  sell = scanner.DetectionResult(
+    "Supply Reaction", "SELL", 4123.5,
+    Zone(4122.24, 4124.73, "supply"), 4123.0, 3, ["local supply"],
+  )
+
+  selected, conflicts = scanner._suppress_overlaps([buy, sell])
+
+  assert {item.direction for item in selected} == {"BUY", "SELL"}
+  assert conflicts == []
+
+
+def test_true_duplicate_same_direction_overlap_keeps_stronger(monkeypatch):
   monkeypatch.setattr(scanner.settings, "alert_overlap_suppress", 0.5)
   monkeypatch.setattr(scanner.settings, "scanner_conflict_overlap", 0.5)
   monkeypatch.setattr(scanner.settings, "scanner_conflict_margin", 1)
@@ -1220,7 +1297,7 @@ def test_same_direction_overlap_behaviour_is_unchanged(monkeypatch):
     Zone(4094, 4096, "supply", score=13), 4090.0, 3, ["HTF bias down"],
   )
   weak = scanner.DetectionResult(
-    "Fade Scalp", "SELL", 4095.0,
+    "Snap-Back", "SELL", 4095.0,
     Zone(4095, 4097, "supply", score=11), 4090.0, 2, ["HTF bias down"],
   )
 
